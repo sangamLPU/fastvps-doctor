@@ -14,7 +14,9 @@ Sources: [VPS service](https://fastvps.gr/en/vps/), [Managed VPS scope](https://
 
 ## Current status
 
-Version 0.2.0 is a **beta candidate for engineering evaluation**. It includes local resource checks, bounded local filesystem/inode inspection, IPv4/IPv6 default-route observations, explicitly selected listener ports, systemd service-state checks, effective SSH configuration, opt-in Nginx/Apache/SSH validators, deterministic findings and versioned JSON/Markdown support reports. The `incident` command classifies bounded timestamped journal metadata for one selected systemd unit; raw log messages are discarded. Validation on WSL Ubuntu 26.04 / Python 3.14.4 passed all 136 tests (including Linux integration tests), Ruff lint/format, mypy and dependency consistency checks; a built wheel, CLI, JSON/Markdown report output and POSIX report permissions were also exercised. Windows 11 / Python 3.13.7 passed 134 tests with two Linux-only tests skipped. GitHub Actions is configured for Ubuntu 24.04, Debian 12 and Debian 13 integration images, but has not run. The sponsored Ubuntu 24.04.5 VPS has not been tested, so compatibility with that host and those CI images is unverified. This is not a production-readiness claim or an official/endorsed FastVPS product. See [release readiness](docs/RELEASE_READINESS.md), [limitations](docs/LIMITATIONS.md), the [complete QA report](docs/COMPLETE_QA_REPORT.md), and the [Linux test guide](docs/LINUX_VPS_TESTING_GUIDE.md) before use.
+Version 0.3.0 is a **beta candidate for engineering evaluation**. It adds three focused `troubleshoot` workflows—website/application unavailable, service crash/restart, and storage problems—with bounded evidence collection and a local, versioned support handoff report. It also retains v0.2's system, storage, network, service, security and incident commands. The new report uses explicit allowlists, redacts nonstandard service names, omits raw logs and application response bodies, requests owner-only POSIX permissions, and never overwrites an existing report. A loopback HTTP `HEAD` probe is optional and does not test public reachability.
+
+Engineering verification in this review: Windows 11 / Python 3.13.7 passed 154 tests with four Linux integration tests deselected; WSL Ubuntu 26.04 / Python 3.14.4 passed all 158 tests, including the Linux integration suite. Ruff, formatting, mypy and `pip check` passed in both environments; the Linux run also passed wheel installation, generated CLI, JSON/Markdown reports and POSIX mode-0600 report checks. The WSL run is not Ubuntu 24.04.5 or Debian. GitHub Actions is configured for Ubuntu 24.04, Debian 12 and Debian 13 integration images, but those jobs have not run. You reported personally smoke-testing the sponsored Ubuntu 24.04.5 VPS; this review did not access the VPS or independently verify that report. No test result establishes production readiness or official FastVPS support. See [the complete QA report](docs/COMPLETE_QA_REPORT.md) for boundaries and performance measurements, [release readiness](docs/RELEASE_READINESS.md), [v0.3 product focus](docs/V0_3_PRODUCT_FOCUS.md), [gap analysis](docs/GAP_ANALYSIS.md), [limitations](docs/LIMITATIONS.md), and the [safe Linux testing guide](docs/LINUX_VPS_TESTING_GUIDE.md).
 
 ## Quick start
 
@@ -42,6 +44,10 @@ fastvps-doctor network --connect-host example.org --connect-port 443
 fastvps-doctor network --listen-port 3000
 fastvps-doctor incident --service nginx --since 2h --format markdown --output incident-report.md
 fastvps-doctor web --port 3000
+fastvps-doctor troubleshoot
+fastvps-doctor troubleshoot --scenario website-unavailable --service nginx --port 8080 --probe-http
+fastvps-doctor troubleshoot --scenario service-crash --service app-worker --since 1h --format json --output crash-report.json
+fastvps-doctor troubleshoot --scenario storage --format markdown --output storage-report.md
 fastvps-doctor report --format markdown --profile fastvps --strict-exit-codes --output support-report.md
 fastvps-doctor report --format json
 fastvps-doctor explain
@@ -62,6 +68,7 @@ The optional DNS and TCP commands contact only the one destination explicitly su
 - [Engineering review and master-prompt gap analysis](docs/GAP_ANALYSIS.md)
 - [Support use cases and scope boundaries](docs/FASTVPS_SUPPORT_USE_CASES.md)
 - [Synthetic demonstration scenarios](docs/DEMOS.md)
+- [v0.3 product focus and acceptance criteria](docs/V0_3_PRODUCT_FOCUS.md)
 - [v0.2 engineering audit](docs/V0_2_ENGINEERING_AUDIT.md)
 - [Compatibility and limitations](docs/LIMITATIONS.md)
 - [Contributing](CONTRIBUTING.md)

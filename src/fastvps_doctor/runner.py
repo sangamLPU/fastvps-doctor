@@ -153,7 +153,10 @@ class CommandRunner:
     def systemd_unit_show(self, unit: str, timeout: float = 3.0) -> CommandResult:
         """Read a small fixed set of properties for one validated systemd unit."""
         unit = safe_systemd_unit(unit)
-        properties = "Id,LoadState,ActiveState,SubState,UnitFileState,Result,NRestarts"
+        properties = (
+            "Id,LoadState,ActiveState,SubState,UnitFileState,Result,NRestarts,"
+            "ExecMainCode,ExecMainStatus"
+        )
         return self._invoke(
             "systemctl",
             ("show", "--no-pager", f"--property={properties}", unit),

@@ -7,15 +7,20 @@ The CLI coordinates focused local checks. Checks return structured models, deter
 ```mermaid
 flowchart LR
   CLI[Typer CLI] --> Checks[Local diagnostics]
+  CLI --> Troubleshoot[Selected support scenario]
   Checks --> Sys[System / storage / network]
   Checks --> Svc[Systemd / SSH / web]
   Svc --> Runner[Bounded command runner]
   CLI --> Incident[Bounded incident analysis]
   Incident --> Runner
+  Troubleshoot --> Runner
+  Troubleshoot --> Checks
   Checks --> Models[Structured Pydantic models]
   Incident --> Models
+  Troubleshoot --> Models
   Models --> Rules[Deterministic rules]
   Models --> Privacy[Report allowlists and redaction]
+  Troubleshoot --> Privacy
   Rules --> Privacy
   Privacy --> Render[Local JSON / Markdown]
   Render --> User[Human review before sharing]
@@ -29,6 +34,7 @@ src/fastvps_doctor/
   cli.py                  Typer commands and Rich output
   config.py               validated local thresholds
   incident_analysis.py    bounded timestamped journal classification and correlation
+  troubleshoot.py         three focused evidence workflows and sanitized support handoff
   models.py               check, finding, incident and versioned report schemas
   platform.py             restricted Linux distribution identification
   privacy.py              metric allowlists, field bounds and common-pattern redaction
@@ -58,18 +64,19 @@ examples/                   synthetic report and demo reproductions
 - Service state uses bounded `systemctl show` properties rather than executable presence alone. Common aliases are deduplicated; custom units require explicit selection.
 - SSH review uses `sshd -T`. A complete optional connection context is required for contextual `Match` rules; without it, the report does not claim per-user effective policy.
 - Incident analysis calls `journalctl` for a single validated service plus a bounded kernel event window. It accepts only structured timestamped records, maps known phrases to static event summaries, and drops original message text before report construction.
+- The v0.3 troubleshooting flow collects evidence for one selected scenario: website/application unavailable, one service crash/restart, or storage. Service state, local listener state, optional loopback HTTP response and public reachability are kept distinct. Its schema 1.0 handoff report is separately allowlisted from the existing general report schema 2.0.
 - Memory pressure uses Linux PSI where available. Swap use only corroborates low-available-memory observations; it does not independently create a finding.
 - Reports use schema version 2.0. The existing CLI is retained and strict automation exit codes are opt-in to avoid changing default command behavior.
 
 ## Validation status
 
-The 11 October 2026 QA run passed 134 tests on Windows 11/Python 3.13.7 (two Linux-only integration tests skipped) and 136 tests on WSL Ubuntu 26.04/Python 3.14.4 (including the opted-in Linux integration tests). Linux statement coverage was 92.5% and branch-inclusive coverage was 90%. Linux Ruff, formatting, mypy, pip consistency, source installation, and rebuilt-wheel console entry point passed. Real WSL diagnostics, JSON/Markdown report creation, mode 0600, systemd inspection, and comparisons with native storage/memory/route utilities were exercised. GitHub Actions is configured for Ubuntu unit jobs and disposable Ubuntu 24.04/Debian 12/Debian 13 integration images, but those jobs have not run. Docker was unavailable, so the local Ubuntu 24.04/Debian matrix was not run; the sponsored Ubuntu 24.04.5 VPS was not accessed. This does not establish compatibility with that VPS or production readiness. See [testing](TESTING.md), [limitations](LIMITATIONS.md), [the complete QA report](COMPLETE_QA_REPORT.md) and [release readiness](RELEASE_READINESS.md).
+The 11 October 2026 v0.3 QA run passed 154 tests on Windows 11/Python 3.13.7 with four Linux integration tests deselected, and all 158 tests on WSL Ubuntu 26.04/Python 3.14.4. Linux Ruff, formatting, mypy, pip consistency, source installation, rebuilt-wheel installation and console entry point passed. Real WSL scenario diagnostics, JSON/Markdown report creation, mode 0600, systemd inspection and comparisons with native storage utilities were exercised. GitHub Actions is configured for Ubuntu unit jobs and disposable Ubuntu 24.04/Debian 12/Debian 13 integration images, but those jobs have not run. Docker was unavailable, so those local images were not run; the sponsored Ubuntu 24.04.5 VPS was not accessed. This does not establish compatibility with that VPS or production readiness. The historical v0.2 coverage figures in earlier QA records were not recalculated for v0.3. See [testing](TESTING.md), [limitations](LIMITATIONS.md), [the complete QA report](COMPLETE_QA_REPORT.md) and [release readiness](RELEASE_READINESS.md).
 
 ## Remaining implementation and validation stages
 
 - [x] Audit the original implementation and record evidence-backed risks.
 - [x] Harden service states, effective SSH inspection, storage and report privacy.
-- [x] Add bounded incident analysis, versioned support handoff and strict exit option.
+- [x] Add bounded incident analysis, strict exit option and the v0.3 three-scenario support handoff.
 - [x] Add mocked failure fixtures, test-backed synthetic demos and Ubuntu/Debian CI configuration.
 - [x] Run source and wheel integration in WSL Ubuntu 26.04; add real unprivileged Linux smoke evidence.
 - [ ] Run GitHub CI and the Ubuntu 24.04/Debian 12/Debian 13 matrix; fix any distro-specific failures.

@@ -28,10 +28,13 @@ from fastvps_doctor.models import (
     DiagnosticReport,
     IncidentInformation,
     ProblemCategory,
+    TroubleshootReport,
+    TroubleshootScenario,
 )
 from fastvps_doctor.reports import build_report, render_markdown, write_exclusive
 from fastvps_doctor.rules import rule_catalog
 from fastvps_doctor.runner import safe_hostname, safe_systemd_unit
+from fastvps_doctor.troubleshoot import build_troubleshoot_report, render_troubleshoot_markdown
 
 app = typer.Typer(
     name="fastvps-doctor",
@@ -141,6 +144,83 @@ def _emit_report(report: DiagnosticReport, output_format: str, output: Path | No
         typer.echo(f"Created local report: {output}")
     else:
         typer.echo(content)
+
+
+def _emit_troubleshoot_report(
+    report: TroubleshootReport, output_format: str, output: Path | None
+) -> None:
+    normalized_format = output_format.lower()
+    if normalized_format not in {"json", "markdown", "md"}:
+        raise typer.BadParameter("Choose json or markdown.")
+    if output is None:
+        if normalized_format == "json":
+            typer.echo(report.json_document())
+            return
+        _render_troubleshoot_summary(report)
+        return
+    content = (
+        report.json_document() + "\n"
+        if normalized_format == "json"
+        else render_troubleshoot_markdown(report)
+    )
+    try:
+        write_exclusive(output, content)
+    except FileExistsError:
+        raise typer.BadParameter(
+            "The output file already exists; choose a new path to avoid overwriting it."
+        ) from None
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not create report ({type(exc).__name__}).") from None
+    typer.echo(f"Created local report: {output}")
+
+
+def _render_troubleshoot_summary(report: TroubleshootReport) -> None:
+    typer.echo(f"Scenario: {report.scenario.value}")
+    typer.echo(f"Snapshot (UTC): {report.timestamp_utc.isoformat()}")
+    typer.echo("Checks:")
+    for check in report.checks:
+        typer.echo(f"  {check.status.value.upper():7} {check.check_id}: {check.summary}")
+    typer.echo("Observations:")
+    for observation in report.observations:
+        typer.echo(f"  {observation.evidence_id}: {observation.summary}")
+    typer.echo("Explanations:")
+    for conclusion in report.conclusions:
+        evidence = ", ".join(conclusion.evidence_ids) or "no supporting observation"
+        typer.echo(f"  {conclusion.certainty.value.upper()} ({evidence}): {conclusion.statement}")
+    if report.evidence_gaps:
+        typer.echo("Evidence limits:")
+        for gap in report.evidence_gaps:
+            typer.echo(f"  - {gap}")
+    typer.echo("Review any generated report before sharing it.")
+
+
+def _prompt_scenario() -> TroubleshootScenario:
+    typer.echo("Choose the problem you want to investigate:")
+    typer.echo("  1. Website or application unavailable")
+    typer.echo("  2. Service crash or restart")
+    typer.echo("  3. Disk or storage problem")
+    choice = typer.prompt("Enter 1, 2 or 3", default="1").strip()
+    scenarios = {
+        "1": TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        "2": TroubleshootScenario.SERVICE_CRASH,
+        "3": TroubleshootScenario.STORAGE,
+    }
+    if choice not in scenarios:
+        raise typer.BadParameter("Choose 1, 2 or 3.")
+    return scenarios[choice]
+
+
+def _prompt_unit(label: str = "Systemd service unit") -> str:
+    value = str(typer.prompt(label)).strip()
+    try:
+        safe_systemd_unit(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    return value
+
+
+def _is_interactive() -> bool:
+    return sys.stdin.isatty()
 
 
 def _strict_exit_if_requested(report: DiagnosticReport, enabled: bool) -> None:
@@ -453,6 +533,170 @@ def web(
 ) -> None:
     """Check loopback HTTP/HTTPS reachability and local web listener counts."""
     _render_area(ctx, collect_web(required_port=port), json_output)
+
+
+@app.command()
+def troubleshoot(
+    scenario: Annotated[
+        str | None,
+        typer.Option(
+            "--scenario",
+            help="website-unavailable, service-crash or storage; omit for the interactive picker.",
+        ),
+    ] = None,
+    service: Annotated[
+        str | None, typer.Option("--service", help="One explicitly selected systemd unit.")
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option("--port", min=1, max=65535, help="Expected local application port."),
+    ] = None,
+    since: Annotated[
+        str, typer.Option("--since", help="Bounded journal window such as 30m, 2h or 1d.")
+    ] = "2h",
+    probe_http: Annotated[
+        bool | None,
+        typer.Option(
+            "--probe-http/--no-probe-http",
+            help="Opt in to one HTTP HEAD request to 127.0.0.1 on the selected port.",
+        ),
+    ] = None,
+    validate_config: Annotated[
+        bool | None,
+        typer.Option(
+            "--validate-config/--no-validate-config",
+            help="Opt in to a supported read-only configuration syntax check.",
+        ),
+    ] = None,
+    description: Annotated[
+        str | None,
+        typer.Option("--description", help="Brief symptom only; do not enter passwords or keys."),
+    ] = None,
+    format: Annotated[
+        str,
+        typer.Option(
+            "--format", help="Local report format when --output is supplied: markdown or json."
+        ),
+    ] = "markdown",
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", help="Create a new private local report file; never overwrites."),
+    ] = None,
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="Add support context (fastvps).")
+    ] = None,
+    ticket_reference: Annotated[
+        str | None, typer.Option("--ticket-reference", help="Optional support ticket reference.")
+    ] = None,
+) -> None:
+    """Guide one focused, read-only support diagnosis and optionally save a local report."""
+    if format.lower() not in {"json", "markdown", "md"}:
+        raise typer.BadParameter("Choose json or markdown.")
+    # An explicit scenario means explicit flag-driven use; only the no-argument
+    # numbered picker enters interactive mode.
+    interactive = scenario is None and _is_interactive()
+    selected_scenario: TroubleshootScenario
+    if scenario is None:
+        if not interactive:
+            raise typer.BadParameter(
+                "--scenario is required in non-interactive use; choose one of the three listed values."
+            )
+        selected_scenario = _prompt_scenario()
+    else:
+        try:
+            selected_scenario = TroubleshootScenario(scenario)
+        except ValueError:
+            allowed = ", ".join(item.value for item in TroubleshootScenario)
+            raise typer.BadParameter(f"Choose one of: {allowed}.") from None
+
+    if (
+        selected_scenario
+        in {
+            TroubleshootScenario.WEBSITE_UNAVAILABLE,
+            TroubleshootScenario.SERVICE_CRASH,
+        }
+        and service is None
+    ):
+        if not interactive:
+            raise typer.BadParameter("--service is required for this scenario.")
+        service = _prompt_unit()
+    if selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE and port is None:
+        if not interactive:
+            raise typer.BadParameter("--port is required for the website scenario.")
+        try:
+            port = typer.prompt("Expected local application port", type=int)
+        except (ValueError, TypeError) as exc:
+            raise typer.BadParameter("Enter a port between 1 and 65535.") from exc
+        if not 1 <= port <= 65535:
+            raise typer.BadParameter("Enter a port between 1 and 65535.")
+    if (
+        selected_scenario == TroubleshootScenario.STORAGE
+        and service is None
+        and interactive
+        and typer.confirm("Include one related service's bounded event timeline?", default=False)
+    ):
+        service = _prompt_unit("Related systemd service unit")
+
+    if probe_http is None:
+        probe_http = (
+            typer.confirm(
+                "Send one HTTP HEAD request to 127.0.0.1 on the selected port?", default=False
+            )
+            if interactive and selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+            else False
+        )
+    if validate_config is None:
+        validate_config = (
+            typer.confirm("Run a supported read-only configuration syntax check?", default=False)
+            if interactive and service and selected_scenario != TroubleshootScenario.STORAGE
+            else False
+        )
+    if description is None and interactive:
+        description = (
+            typer.prompt("Brief symptom (optional; do not enter credentials)", default="").strip()
+            or None
+        )
+
+    if selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
+        if service is None or port is None:
+            raise typer.BadParameter("The website scenario requires --service and --port.")
+    elif selected_scenario == TroubleshootScenario.SERVICE_CRASH:
+        if service is None:
+            raise typer.BadParameter("The service-crash scenario requires --service.")
+        if port is not None or probe_http:
+            raise typer.BadParameter("--port and --probe-http apply only to the website scenario.")
+    elif port is not None or probe_http:
+        raise typer.BadParameter("--port and --probe-http apply only to the website scenario.")
+    if selected_scenario == TroubleshootScenario.STORAGE and validate_config:
+        raise typer.BadParameter(
+            "--validate-config requires the website or service-crash scenario."
+        )
+    if selected_scenario == TroubleshootScenario.STORAGE and service is None and since != "2h":
+        raise typer.BadParameter("--since requires --service in the storage scenario.")
+
+    profile = _validate_profile(profile)
+    try:
+        report_data = build_troubleshoot_report(
+            selected_scenario,
+            service=service,
+            port=port,
+            since=since,
+            probe_http=probe_http,
+            validate_config=validate_config,
+            description=description,
+            ticket_reference=ticket_reference,
+            profile=profile,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    if (
+        output is None
+        and interactive
+        and typer.confirm("Save a private local support report?", default=False)
+    ):
+        output = Path(typer.prompt("New report file path"))
+    _emit_troubleshoot_report(report_data, format, output)
 
 
 @app.command()

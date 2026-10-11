@@ -31,6 +31,18 @@ The output path must not already exist. Open and review the file locally before 
 
 For a bounded timeline for one systemd service, run `fastvps-doctor incident --service nginx --since 2h`. It reads available timestamped journal metadata, discards raw messages, and reports event classifications without asserting why an event happened. Denied journal access or missing timestamps make the result incomplete. `services --validate-config` is a separate opt-in for selected Nginx/Apache/SSH validators.
 
+## Focused troubleshooting
+
+Run `fastvps-doctor troubleshoot` for a numbered prompt, or choose one of the three v0.3 scenarios explicitly:
+
+```bash
+fastvps-doctor troubleshoot --scenario website-unavailable --service nginx --port 8080
+fastvps-doctor troubleshoot --scenario service-crash --service app-worker --since 1h --format markdown --output crash-report.md
+fastvps-doctor troubleshoot --scenario storage --format json --output storage-report.json
+```
+
+Website checks inspect only the selected systemd unit and port alongside bounded local context. `--probe-http` is optional and sends one `HEAD /` request to `127.0.0.1`; it does not check public DNS, TLS, firewall paths or external reachability. `--validate-config` is also opt-in and works only for the supported Nginx, Apache and SSH syntax validators. The service-crash scenario inspects one selected unit and its bounded journal window. Storage does not search files or suggest deleting them. Scenario reports use schema 1.0, omit raw logs and response bodies, and remain local for manual review.
+
 ## 4. Ask what the rules mean
 
 ```bash

@@ -27,7 +27,7 @@ def test_help_exposes_only_working_commands() -> None:
 def test_version_command_is_independent() -> None:
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "FastVPS Doctor 0.2.0" in result.stdout
+    assert "FastVPS Doctor 0.3.0" in result.stdout
     assert "unofficial" in result.stdout
 
 

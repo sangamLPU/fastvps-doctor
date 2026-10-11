@@ -16,6 +16,10 @@ from fastvps_doctor.models import (
     IncidentHypothesis,
     IncidentInformation,
     SupportHandoff,
+    TroubleshootConclusion,
+    TroubleshootObservation,
+    TroubleshootReport,
+    TroubleshootTimelineEvent,
 )
 
 CHECK_FIELDS: dict[str, set[str]] = {
@@ -66,6 +70,20 @@ CHECK_FIELDS: dict[str, set[str]] = {
         "unit_count",
         "custom_unit_count",
     },
+    "troubleshoot.service": {
+        "service_unit_found",
+        "service_state",
+        "service_restart_count",
+        "service_result",
+        "service_exec_main_code",
+        "service_exec_main_status",
+    },
+    "troubleshoot.http": {
+        "http_probe_requested",
+        "http_probe_state",
+        "http_status_code",
+    },
+    "troubleshoot.config": {"config_state"},
     "security.local": {
         "ssh_root_login_restricted",
         "ssh_password_login_disabled",
@@ -106,8 +124,33 @@ SAFE_STATES = {
     "partial",
     "unsupported_filesystem",
     "remote_skipped",
+    "not_supported",
+    "response_2xx",
+    "response_3xx",
+    "response_4xx",
+    "response_5xx",
+    "response_1xx",
+    "response_other",
+    "connection_error",
+    "protocol_error",
 }
 SAFE_FIREWALL_STATES = {"active", "inactive", "unknown", "timeout", "unavailable"}
+SAFE_SERVICE_RESULTS = {
+    "success",
+    "exit-code",
+    "signal",
+    "core-dump",
+    "timeout",
+    "watchdog",
+    "protocol",
+    "resources",
+    "start-limit-hit",
+    "condition",
+    "exec-condition",
+    "dependency",
+    "unsupported",
+    "reload-or-try-restart",
+}
 SAFE_SERVICE_NAMES = {
     "apache",
     "apache2",
@@ -148,6 +191,9 @@ CHECK_CATEGORIES = {
     "network.listeners": "network",
     "storage.mounts": "storage",
     "services.common": "services",
+    "troubleshoot.service": "services",
+    "troubleshoot.http": "web",
+    "troubleshoot.config": "services",
     "security.local": "security",
     "web.local": "web",
 }
@@ -215,6 +261,8 @@ def _safe_metric_value(key: str, value: Any) -> str | int | float | bool | None 
         return "[REDACTED SERVICE]"
     if key == "firewall_state":
         return value if value in SAFE_FIREWALL_STATES else _DROP
+    if key == "service_result":
+        return value if value in SAFE_SERVICE_RESULTS else _DROP
     if key.endswith("_filesystem_type"):
         return value if value in SAFE_FILESYSTEM_TYPES else _DROP
     if key.endswith("_state") or key.endswith("_config_validation"):
@@ -433,6 +481,80 @@ def sanitize_handoff(handoff: SupportHandoff) -> SupportHandoff:
             value for value in handoff.unavailable_checks[:16] if value in valid_unavailable
         ],
         next_actions=[_clean_text(value, 240) for value in handoff.next_actions[:16]],
+    )
+
+
+def sanitize_troubleshoot_report(report: TroubleshootReport) -> TroubleshootReport:
+    """Rebuild the scenario report from explicit privacy allowlists."""
+    safe_checks = sanitize_checks(report.checks)
+    service_label = _clean_service_unit(report.service_label) if report.service_label else None
+    safe_timeline = [
+        TroubleshootTimelineEvent(
+            event_id=f"EVT-{index:03d}",
+            timestamp_utc=timestamp,
+            classification=event.classification,
+            summary=_clean_text(event.summary, 240),
+        )
+        for index, event in enumerate(report.timeline[:100], start=1)
+        if (timestamp := _utc_if_aware(event.timestamp_utc)) is not None
+    ]
+    safe_observations = [
+        TroubleshootObservation(
+            evidence_id=f"OBS-{index:03d}",
+            source=(
+                observation.source
+                if observation.source in {"snapshot", "loopback", "journal", "filesystem"}
+                else "snapshot"
+            ),
+            summary=_clean_text(observation.summary, 240),
+            check_id=(observation.check_id if observation.check_id in CHECK_CATEGORIES else None),
+            status=observation.status,
+        )
+        for index, observation in enumerate(report.observations[:100], start=1)
+    ]
+    allowed_evidence_ids = {item.evidence_id for item in safe_observations} | {
+        item.event_id for item in safe_timeline
+    }
+    safe_conclusions = [
+        TroubleshootConclusion(
+            certainty=item.certainty,
+            statement=_clean_text(item.statement, 300),
+            evidence_ids=[value for value in item.evidence_ids if value in allowed_evidence_ids][
+                :12
+            ],
+        )
+        for item in report.conclusions[:20]
+    ]
+    return TroubleshootReport(
+        version=_clean_text(report.version, 32),
+        timestamp_utc=_utc_if_aware(report.timestamp_utc) or datetime.now(UTC),
+        scenario=report.scenario,
+        distribution=sanitize_distribution(report.distribution),
+        kernel_release=(
+            re.sub(r"[^A-Za-z0-9.+_-]", "", report.kernel_release)[:64]
+            if report.kernel_release
+            else None
+        ),
+        reported_problem=_clean_text(report.reported_problem, 500)
+        if report.reported_problem
+        else None,
+        service_label=service_label,
+        selected_port=(
+            report.selected_port
+            if report.selected_port is not None and 1 <= report.selected_port <= 65535
+            else None
+        ),
+        loopback_http_probe_requested=report.loopback_http_probe_requested,
+        checks=safe_checks,
+        observations=safe_observations,
+        timeline=safe_timeline,
+        conclusions=safe_conclusions,
+        investigation_areas=[_clean_text(value, 240) for value in report.investigation_areas[:16]],
+        evidence_gaps=[_clean_text(value, 240) for value in report.evidence_gaps[:16]],
+        next_actions=[_clean_text(value, 240) for value in report.next_actions[:16]],
+        profile="fastvps" if report.profile == "fastvps" else None,
+        ticket_reference=sanitize_ticket_reference(report.ticket_reference),
+        review_reminder="Review and redact this report before sharing it.",
     )
 
 

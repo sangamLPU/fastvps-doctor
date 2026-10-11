@@ -237,6 +237,8 @@ def _parse_properties(stdout: str) -> dict[str, str]:
             "UnitFileState",
             "Result",
             "NRestarts",
+            "ExecMainCode",
+            "ExecMainStatus",
         }:
             properties[key] = value.strip()
     return properties

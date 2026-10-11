@@ -1,51 +1,39 @@
-# Synthetic, test-backed demonstrations
+# v0.3 scenario demonstrations
 
-All three scenarios below are fabricated unit fixtures. They do not run `systemctl`, `journalctl`, or `df`, and they do not access a server. The example reports use the real report builder, rule engine and privacy allowlists. They are not FastVPS customer or VPS data.
+The checked-in reports below are deterministic synthetic fixtures. They contain no real host measurements, customer information or raw logs and are examples of the new support-handoff format.
 
-## Reproduce
+## Reproduce the fixture reports
 
-From a development checkout with its Python environment active:
+From a development checkout with the package installed:
 
 ```bash
-python -m pytest -q -v tests/test_demos.py
-python examples/synthetic_demos.py website-unavailable
-python examples/synthetic_demos.py storage-pressure
-python examples/synthetic_demos.py restart-loop
+python examples/troubleshoot_demos.py website-unavailable
+python examples/troubleshoot_demos.py service-crash
+python examples/troubleshoot_demos.py storage
 ```
 
-Each generator command prints a deterministic Markdown report to stdout. To create a new file without overwriting an existing one, pass `--output FILE`.
+Each command prints a sanitized Markdown report. Add `--output FILE` to create a new local report; an existing file is never overwritten. The sample outputs are [website unavailable](../examples/demos/troubleshoot-website-unavailable.md), [service crash/restart](../examples/demos/troubleshoot-service-crash.md), and [storage pressure](../examples/demos/troubleshoot-storage.md).
 
-Actual test output from the Windows/Python 3.13.7 review run:
+The fixtures demonstrate these limits:
 
-```text
-tests\test_demos.py ...                                                  [100%]
-3 passed in 0.27s
+- Website: one failed unit state, no listener on the selected port and one service failure event. These observations do not identify why the app failed or whether it is reachable publicly.
+- Service: repeated restart-scheduling records and a nearby OOM event. Both explanations are labelled plausible; timing does not establish cause.
+- Storage: high space and inode use with one service error record. The report explicitly avoids attributing the write problem to storage or recommending deletion.
+
+## Live disposable loopback example
+
+On WSL or another disposable Linux system, run:
+
+```bash
+python examples/troubleshoot_demos.py website-unavailable --live-local
 ```
 
-## Demo A — Website unavailable
+This starts a temporary unprivileged HTTP service bound only to `127.0.0.1` on an operating-system-assigned port. The service deliberately returns HTTP 503 to one `HEAD /` request. FastVPS Doctor also performs its read-only selected-unit, listener, storage, resource and bounded-journal checks. The script shuts down the temporary service in a `finally` block. It does not change systemd configuration or contact an external host. Its report combines the live loopback observation with current host context, so use it only on a disposable Linux environment, review the report, and do not run this demo on the sponsored VPS.
 
-The fixture reports a failed Nginx systemd state and no local listener on the explicitly selected port 8080. It produces `SVC-NGIN-001` and `WEB-001`.
+The live demo is covered by a Linux integration test that starts a local service and verifies the HTTP status. The CI Docker matrix executes the test in isolated Ubuntu 24.04, Debian 12 and Debian 13 images. A WSL pass does not prove those GitHub jobs passed; the workflow remains pending until run in GitHub Actions.
 
-Run `python -m pytest -q -v tests/test_demos.py::test_website_unavailable_demo_shows_service_and_listener_evidence`, then render with `python examples/synthetic_demos.py website-unavailable`. The sanitized full example is [website-unavailable.md](../examples/demos/website-unavailable.md).
+## Prior v0.2 fixtures
 
-The report gives a support engineer two useful guest-side observations without claiming why the daemon stopped. It recommends checking service state and bind settings before changing anything.
+Earlier general diagnostic examples remain available through [the synthetic demo script](../examples/synthetic_demos.py) and [their generated reports](../examples/demos/). They are retained as historical examples and do not exercise the v0.3 `troubleshoot` orchestration.
 
-## Demo B — Storage pressure
-
-The fixture sets a synthetic non-root ext4 mount to 92.0% available-capacity use. It produces the critical `STOR-005` finding and omits the mount path. Root storage remains a separate passing check.
-
-Run `python -m pytest -q -v tests/test_demos.py::test_storage_pressure_demo_shows_index_without_mount_path`, then render with `python examples/synthetic_demos.py storage-pressure`. The sanitized full example is [storage-pressure.md](../examples/demos/storage-pressure.md).
-
-The indexed mount observation directs the customer to local `df -hT`/`df -i` review and ownership investigation. It does not recommend deleting files or imply which application used the space.
-
-## Demo C — Service restart loop
-
-The fixture supplies three timestamped service-manager restart records, a failure transition and a nearby kernel OOM indicator. The analyzer orders these real fixture timestamps and produces a low-confidence OOM correlation plus a restart-loop hypothesis. Raw `MESSAGE` text—including the fabricated process ID—is not exported.
-
-Run `python -m pytest -q -v tests/test_demos.py::test_restart_loop_demo_has_real_synthetic_timestamps_and_discards_logs`, then render with `python examples/synthetic_demos.py restart-loop`. The sanitized full example is [restart-loop.md](../examples/demos/restart-loop.md).
-
-The timeline gives support a time range and event categories to compare with application monitoring or deployments. It explicitly states that temporal proximity does not establish causation.
-
-## Output status
-
-The test output above proves the synthetic fixture assertions and report rendering on the current Windows host. It does not verify Linux journald behavior, actual Nginx failure detection, filesystem exhaustion or OOM access. Use disposable Linux environments for those checks; never simulate a failure on the sponsored production VPS.
+Never induce service crashes, OOM, filesystem exhaustion, permission changes, or network failures on the sponsored VPS. Use mocks or disposable containers/VMs for failure simulations.

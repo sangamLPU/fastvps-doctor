@@ -1,8 +1,10 @@
 # Safe Linux testing guide for the sponsored VPS
 
-This guide runs the current diagnostics on your own FastVPS.gr VPS without changing services, packages, firewall rules, SSH settings or application data. It is a smoke test of read-only behavior, not a way to simulate a failed production service.
+This guide runs the current v0.3 diagnostics on your own FastVPS.gr VPS without changing services, packages, firewall rules, SSH settings or application data. It is a smoke test of read-only behavior, not a way to simulate a failed production service.
 
 The tool's Linux integration tests deliberately create a child process to verify timeout cleanup. Run those only in the disposable Docker/VM environment described in [Testing](TESTING.md), never on the sponsored VPS.
+
+Do not use the `--live-local` demo on the sponsored VPS; that demo intentionally starts a temporary HTTP server. Use the CLI commands below instead.
 
 ## Before starting
 
@@ -22,7 +24,7 @@ python3 --version
 cat /etc/os-release
 ```
 
-The project has now been exercised in WSL Ubuntu 26.04 with Python 3.14.4, but not on your sponsored Ubuntu 24.04.5 VPS. Ubuntu 24.04 and Debian 12/13 CI jobs are configured but have no recorded run yet. This guide is an optional user-run smoke check for the target server, not a request for credentials or remote access. Keep OS/account details private; do not paste them publicly.
+The project was exercised in WSL Ubuntu 26.04 with Python 3.14.4, but this review did not access your sponsored Ubuntu 24.04.5 VPS. You reported separately that you personally smoke-tested that host using Python 3.12.3; those observations were not independently verified here. Ubuntu 24.04 and Debian 12/13 CI jobs are configured but have no recorded run yet. This guide is an optional user-run smoke check, not a request for credentials or remote access. Keep OS/account details private; do not paste them publicly.
 
 If Python is older than 3.11, the virtual-environment module is unavailable, or the OS is outside the target, stop. Do not install packages or replace system Python as part of this review.
 
@@ -74,6 +76,16 @@ fastvps-doctor incident --service nginx --since 2h --format markdown \
 
 Use a service unit that actually exists on the VPS. Journal access may be denied to a normal account; that should remain an incomplete result. Raw log messages are discarded. Do not run configuration validators or `--full` as part of the first live smoke test.
 
+The v0.3 focused workflows can be checked with known service/port values. Use a unit and port that actually match your application. These scenarios are read-only; the optional `--probe-http` sends a single HTTP `HEAD /` to `127.0.0.1` and does not read a response body or test public access:
+
+```bash
+fastvps-doctor troubleshoot --scenario storage --profile fastvps
+fastvps-doctor troubleshoot --scenario service-crash --service nginx --since 30m --profile fastvps
+fastvps-doctor troubleshoot --scenario website-unavailable --service nginx --port 80 --probe-http --profile fastvps
+```
+
+If you do not know the service unit or expected port, do not guess; omit the focused check and record that the value is unknown. Custom service names may be redacted in an exported report. Journal access may remain incomplete for an ordinary account.
+
 For this first production-host smoke test, do not use `--full`: it runs an APT simulation without package-manager locking, so a concurrent package operation could change state while it runs, and the count is not security-specific. Do not supply a network destination unless you have a specific host and port you intend to test. The optional DNS/TCP checks contact only the one destination you enter, but are unnecessary for verifying local command behavior.
 
 ## 4. Save and review private reports
@@ -89,7 +101,7 @@ stat -c '%a %n' "$HOME/fastvps-doctor-review.md" "$HOME/fastvps-doctor-review.js
 less "$HOME/fastvps-doctor-review.md"
 ```
 
-Check that the report says **independent and unofficial**, lists the checks that actually ran, and contains no hostnames, IP addresses, usernames, filesystem paths, raw logs, credentials or unexpected private details. The tool uses metric allowlists and common-pattern text redaction, including known token patterns and PEM private-key blocks, but this is not a universal secret scanner. Review the complete files before sharing them with anyone. Do not attach raw command output or config/log files.
+Check that each report says **independent and unofficial**, lists the checks that actually ran, and contains no hostnames, IP addresses, usernames, filesystem paths, raw logs, credentials or unexpected private details. General reports use schema 2.0; focused scenario reports use schema 1.0. The tool uses metric allowlists and common-pattern text redaction, including known token patterns and PEM private-key blocks, but this is not a universal secret scanner. Review the complete files before sharing them with anyone. Do not attach raw command output or config/log files.
 
 If `stat` does not show mode `600`, keep the report private and do not share it until you understand the file permissions on that filesystem.
 

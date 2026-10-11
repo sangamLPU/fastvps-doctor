@@ -52,6 +52,75 @@ class IncidentEventType(StrEnum):
     MEMORY_PRESSURE = "memory_pressure"
 
 
+class TroubleshootScenario(StrEnum):
+    WEBSITE_UNAVAILABLE = "website-unavailable"
+    SERVICE_CRASH = "service-crash"
+    STORAGE = "storage"
+
+
+class EvidenceCertainty(StrEnum):
+    CONFIRMED = "confirmed"
+    PLAUSIBLE = "plausible"
+    INSUFFICIENT = "insufficient"
+
+
+class TroubleshootObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    source: str
+    summary: str
+    check_id: str | None = None
+    status: CheckStatus | None = None
+
+
+class TroubleshootTimelineEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    timestamp_utc: datetime
+    classification: IncidentEventType
+    summary: str
+
+
+class TroubleshootConclusion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    certainty: EvidenceCertainty
+    statement: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class TroubleshootReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str = "FastVPS Doctor"
+    version: str
+    schema_version: str = "1.0"
+    timestamp_utc: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    scenario: TroubleshootScenario
+    distribution: str = "Unknown Linux distribution"
+    kernel_release: str | None = None
+    reported_problem: str | None = None
+    service_label: str | None = None
+    selected_port: int | None = None
+    loopback_http_probe_requested: bool = False
+    checks: list[DiagnosticCheck]
+    observations: list[TroubleshootObservation] = Field(default_factory=list)
+    timeline: list[TroubleshootTimelineEvent] = Field(default_factory=list)
+    conclusions: list[TroubleshootConclusion] = Field(default_factory=list)
+    investigation_areas: list[str] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    profile: str | None = None
+    ticket_reference: str | None = None
+    review_reminder: str = "Review and redact this report before sharing it."
+
+    def json_document(self) -> str:
+        """Return stable, indented JSON suitable for local review and sharing."""
+        return self.model_dump_json(indent=2)
+
+
 class DiagnosticCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -1,61 +1,65 @@
-# Engineering review and v0.2 master-prompt gap analysis
+# FastVPS Doctor v0.3 master-prompt gap analysis
 
-**Reviewed code version:** 0.2.0 working tree
-**Windows test host:** Windows 11, Python 3.13.7
-**Linux test host:** WSL Ubuntu 26.04, Python 3.14.4
-**Scope boundary:** No sponsored VPS, FastVPS infrastructure, or remote server was accessed. No push was made.
+**Reviewed version:** 0.3.0 working tree
+**Review date:** 11 October 2026
+**Assessment:** Beta candidate for engineering evaluation; not production-ready
+**Server access:** No sponsored VPS, FastVPS infrastructure or remote server was accessed.
 
-“Implemented” means code and tests exist. “Linux tested” refers only to the WSL environment above. Neither label establishes production safety, FastVPS usefulness, adoption, or company approval.
+This compares the current implementation with the v0.3 requirements summarized in [the product-focus document](V0_3_PRODUCT_FOCUS.md). “Implemented” describes code/tests present. “Verified” is limited to the environment and evidence named below. The prior v0.2 audit remains at [V0_2_ENGINEERING_AUDIT.md](V0_2_ENGINEERING_AUDIT.md); historical v0.2 QA results remain above the v0.3 section in [the complete QA report](COMPLETE_QA_REPORT.md).
 
-## Current assessment
+## Requirement comparison
 
-The reviewed candidate passed 134 Windows tests (two Linux-only tests skipped) and 136 Linux tests (including the opt-in integration tests) on WSL Ubuntu 26.04. Linux source and wheel installations, the console entry point, real unprivileged diagnostics, report output modes/permissions, systemd inspection, and selected comparisons with native Linux utilities were exercised. The WSL run does not match the sponsored server's Ubuntu 24.04.5 target.
-
-**Release classification: BETA CANDIDATE FOR ENGINEERING EVALUATION.** The workflow is configured, but GitHub Actions has not run; no Ubuntu 24.04 or Debian container was tested locally, and the sponsored server was not accessed. This status does not mean production-ready or officially supported. See [release readiness](RELEASE_READINESS.md). An output-cap event in a longer WSL incident query was correctly reported as incomplete and remains an operational limit.
-
-## Requirement-by-requirement status
-
-| Master-prompt area | Current implementation and evidence | Remaining gap |
+| v0.3 requirement | Current implementation | Evidence and remaining gap |
 | --- | --- | --- |
-| Repository review and security posture | Earlier code audit is in [V0_2_ENGINEERING_AUDIT.md](V0_2_ENGINEERING_AUDIT.md); current runner uses bounded, shell-free commands. Bandit has reviewed Low findings only. | Re-scan exact publish tree after final edits; human Linux review remains. No security certification. |
-| CLI and packaging | Existing CLI plus incident workflow and optional strict exit codes. Linux source and rebuilt wheel installs passed; console script worked in WSL. | Ubuntu 24.04.5 and Debian install runs remain. GitHub integration-job evidence is pending. |
-| System health and memory | CPU/load/memory/swap/PSI readings and cautious evidence rules. Real WSL reading compared with `/proc/meminfo`. | Point-in-time only; validate readings on target host and other Linux kernels. No trend history. |
-| Storage | Root and bounded local mount capacity/inode/read-only checks; inaccessible and unsupported inventory stays incomplete. Nullable partition inventory is guarded and regression-tested. WSL root/inode values compared with `df`. | Compare ext4/VPS volumes on the target. No large-directory attribution and no live pressure test. |
-| Network | IPv4/IPv6 route checks, resolver syntax, optional single-destination checks, and selected local listener checks. WSL default route agreed with `ip route`. | No policy routing, namespaces, provider path, or resolver-manager diagnosis. DNS helper threads cannot be forcibly cancelled after timeout. |
-| Services | Bounded systemd property queries, common candidate units, custom-unit selection, and opt-in validators. WSL systemd and journald unit were observed active. Custom service names now redact to `[REDACTED SERVICE]`. | Ubuntu 24.04/Debian and target service setup are untested. Validators were not run on the sponsored server. Non-systemd managers remain limited. |
-| SSH and security | Effective SSH setting inspection and limited UFW indicators; APT simulation remains optional. | No full security audit. Context-free SSH settings are not per-connection proof; UFW is not every firewall. Avoid APT simulation on the production test host. |
-| Incident workflow | Bounded timestamped journal analysis with static event summaries and raw-message discard. Short WSL query ran; longer query exceeded the 65,536-byte runner cap and was marked incomplete. | Journal access, retention, truncation, and event formats vary. A WSL smoke is not a real service failure test and correlation is not causation. |
-| Report v2 and privacy | Schema 2.0, metric allowlists, common-pattern redaction, exclusive output, and mode 0600. WSL JSON/Markdown reports parsed; local username, home, hostname markers absent; both file modes were 0600. | Pattern redaction is not universal DLP. Review the complete report manually; POSIX behavior on other filesystems and Windows ACLs are not certified. |
-| Command safety and timeouts | Central runner, fixed argument forms, no shell, time/output bounds, and Linux process-group behavior. Linux integration tests passed in WSL. | Utility behavior and permissions vary by OS. Do not infer every command's production behavior from one distro. |
-| Failure matrix | Mocks cover route/DNS failures, pressure, malformed outputs, permissions, service state, OOM/restart timelines, report secrets, and timeouts. | Destructive scenarios were not induced on WSL or VPS. Real invalid config, full filesystem, resolver outage, and service failure belong only in disposable fixtures/VMs. |
-| CI and distro support | Workflow separates Ubuntu unit/quality jobs from disposable Ubuntu 24.04, Debian 12, and Debian 13 integration images; token permissions are `contents: read`. | Configuration is not a result. GitHub Actions has not run and local Docker is unavailable. These distro claims remain pending. |
-| Demonstrations and support workflow | Synthetic demos are test-backed and identified as simulated. Report remains customer-controlled and provider-scope-neutral. | Obtain engineering feedback on usefulness and wording; no FastVPS review or adoption exists. |
-| Sponsored VPS validation | A safe normal-user guide is available. | Not run. The user's Ubuntu 24.04.5 system was not accessed. User-run checks are optional and must remain read-only. |
+| Exactly three focused support scenarios | `fastvps-doctor troubleshoot` offers website/application unavailable, service crash/restart, and disk/storage. It does not add unrelated workflow choices. | Interactive picker and explicit flags are tested on Windows; WSL full suite passed. No FastVPS engineer has assessed whether these are the most useful first scenarios. |
+| Relevant, bounded checks per scenario | Website checks one selected unit, one selected port, bounded storage/resource context and bounded journal evidence; loopback `HEAD` is opt-in. Service crash checks one unit, systemd restart/exit properties, bounded service/kernel journal and a current resource snapshot. Storage checks root and bounded local mount counters, with one optional service timeline. | Unit tests assert targeted collector calls and absence of broad collectors. Real read-only WSL runs covered all three. Exact behavior can vary with systemd, journald, kernel and permissions. |
+| Distinguish service state, listener, app response and public reachability | The report labels selected-unit state, local listener count, optional loopback HTTP response and public reachability as separate facts/limits. The HTTP probe sends one `HEAD /` to `127.0.0.1`, reads no body and follows no redirect. | A disposable Linux HTTP server returned 503 to the integration test. Public DNS, TLS, firewall path and external client access were not tested. |
+| Restart and OOM evidence without false causation | The selected unit exposes restart count, result and available exit code/status. Timestamped service/kernel event summaries support repeated-restart and near-OOM observations; a single event is not labelled a loop. Current resources are a separate snapshot and never inserted into the historic timeline. | Mock fixtures cover multiple/single events, near-OOM correlation and incomplete journals. WSL systemd state was read-only inspected, but no restart/OOM failure was induced. Restart count has no time window; journal retention can hide records. |
+| Storage diagnosis without customer-data search or causal overclaim | Root space, inode and read-only counters plus at most 16 bounded mount summaries are available. Optional selected-service errors are shown separately. No recursive walk, file-content read or deletion recommendation is made. | Tests cover high space/inode use, read-only state, unsupported and incomplete mounts. WSL root figures were compared with rounded `df` values. No real full-volume or write-failure scenario was induced. |
+| Evidence traceability and calibrated wording | Reports use `OBS-*` and timestamped `EVT-*` identifiers. Conclusions use confirmed/plausible/insufficient and refer to observation/event IDs. Correlation language does not claim causation. | Unit and fixture tests assert IDs, certainty, timeline boundaries and one-event behavior. Human reviewers should still verify that wording stays useful and cautious. |
+| Engineer-ready local support report | Scenario report schema 1.0 has the reported symptom, environment, checks actually run, observations, timestamped events, evidence-based explanations, investigation areas, evidence gaps and next actions. Markdown and JSON share the sanitized model. | JSON schema validation, Markdown render, wheel install and mode `0600` output were exercised in WSL. FastVPS engineers have not evaluated the report's usefulness. |
+| Privacy and local-only handling | Check metrics are allowlisted; custom service names are redacted unless common; raw journal and validator output and application response bodies are excluded. Reports are exclusive-create local files and request POSIX mode `0600`. | Synthetic secret/path/host/credential tests pass; WSL reports had mode `0600` and passed selected marker checks. Redaction is pattern-based, not universal DLP. A user must manually review the full report. |
+| Interactive and non-interactive command use | No-argument TTY use displays a numbered scenario picker and relevant prompts. Explicit `--scenario` use is flag-driven; required service/port values are validated. | Picker, cancellation, missing flags and explicit option paths are covered by tests. Platform-specific terminal input behavior still merits Linux operator review. |
+| Safe operation | Central command runner uses fixed executables/argument forms, shell-free subprocesses, bounded output and timeouts. Troubleshoot performs no repair, install, restart, external scan, upload or automatic escalation. | WSL process-group timeout test passed. Live demo binds only to loopback and shuts down its temporary server. No privilege escalation is requested. Utility availability/permissions vary by distribution. |
+| Demos, QA and performance record | Three deterministic report fixtures plus a live local HTTP 503 demo exist. Performance records elapsed time, process peak RSS, subprocess count and report size. | WSL 158 tests passed; Windows 154 passed with four Linux integrations deselected. One refreshed WSL performance sample is documented. Reproducible Debian/Ubuntu CI results are pending. |
+| FastVPS-specific neutrality | Optional `--profile fastvps`, ticket-reference validation, official support link and plan-scope caveat are present. The project clearly says it is independent and unofficial. | No portal integration, credential collection, company approval, or responsibility assignment exists. Engineers must review brand/usefulness wording before presentation. |
 
-## Linux validation performed
+## Test evidence boundaries
 
-Actual Linux evidence in this review is limited to WSL Ubuntu 26.04 / Python 3.14.4:
+### Executed on Windows 11 / Python 3.13.7
 
-- 136 tests passed, zero skipped, including the opt-in Linux integration tests.
-- Ruff lint, Ruff formatting, mypy, and pip dependency consistency checks passed.
-- Final Linux coverage was 92.5% by statements and 90% branch-inclusive.
-- Linux wheel rebuilt and installed in a new venv; CLI console entry point and uninstall verified.
-- Final wheel smoke ran the version command, JSON diagnosis, and JSON/Markdown report generation.
-- Report files were mode 0600; tested WSL identity markers were absent.
-- systemd/journald state and basic native storage, memory, and route comparisons were checked.
-- 1-minute journal query completed. A 30-minute query exceeded the configured bounded output and was marked incomplete.
+- 154 passed; 4 Linux integration tests deselected.
+- Ruff lint, Ruff formatting check and mypy passed.
+- Windows tests do not establish Linux systemd, journald, `statvfs`, Linux process cleanup or loopback behavior.
 
-Windows evidence is separate: 134 passed and two Linux integration tests skipped. No Linux outcome is inferred from mocks.
+### Executed on WSL Ubuntu 26.04 / Python 3.14.4
 
-## Required next steps
+- 158 passed, zero skipped, including the opt-in integration suite.
+- Linux Ruff lint, formatting, mypy and `pip check` passed; the updated lock was checked offline.
+- A v0.3.0 wheel was built and installed in an isolated virtual environment; the generated command ran.
+- Read-only service and storage readings were compared with `systemctl show`, `df -P` and `df -Pi` on this WSL instance.
+- All three report scenarios, JSON/Markdown output and POSIX mode `0600` were exercised.
+- The live integration examples ran an unprivileged loopback HTTP server that deliberately returned 503 and shut it down afterward.
 
-1. Review the proposed commit and its staged-file publication scan before pushing.
-2. Push only after your own review, then run and retain GitHub Actions results for all configured jobs.
-3. Resolve any Ubuntu 24.04, Debian 12, or Debian 13 CI failure before naming those as tested.
-4. Optionally run only the normal-user read-only smoke checks on the sponsored VPS, following [the guide](LINUX_VPS_TESTING_GUIDE.md). Never perform destructive fault injection there.
-5. Ask a Linux engineer to review command behavior, uncertainty, redaction limitations, and support workflow.
-6. Keep external claims precise: tested in WSL Ubuntu 26.04, while the sponsored Ubuntu 24.04.5 and CI distro matrix remain unverified. Present this as an independent beta candidate for engineering evaluation, not a supported product.
+### Simulated, not induced on a real host
 
-## FastVPS scope comparison
+Permission-denied and timeout outputs, missing units, high utilization, read-only filesystems, malformed/truncated journals, repeated restart events, OOM correlation, private markers and most rare failures are deterministic test fixtures/mocks. They do not prove how a given VPS kernel or daemon behaves during a real incident.
 
-FastVPS publicly describes infrastructure monitoring and customer-facing DNS/email, website/TLS, and latency tools. FastVPS Doctor provides optional local guest evidence and a customer-controlled support summary. A customer's order and written service agreement define support scope; the tool cannot determine responsibility. See [support use cases](FASTVPS_SUPPORT_USE_CASES.md) and [FastVPS public tools](https://fastvps.gr/en/tools/).
+### Still unverified or blocked
+
+- GitHub Actions is configured for Ubuntu quality jobs on Python 3.11–3.13 and integration images Ubuntu 24.04/Debian 12/Debian 13; no workflow has run.
+- This review did not run Debian images or Ubuntu 24.04 locally; Docker was unavailable in the earlier WSL QA environment.
+- The sponsored Ubuntu 24.04.5 VPS was not accessed. Your own smoke-test observations are recorded as user-reported, not independently verified.
+- Real public reachability, Nginx/Apache/SSH configuration failure, true OOM, real service crash, capacity exhaustion and application-specific behavior remain untested.
+
+## Overall gaps before a supported or production claim
+
+1. Run and retain the complete GitHub Actions matrix; fix any failures before naming those images as tested.
+2. Get Linux-engineer review of command semantics, output uncertainty, report safety and support workflow.
+3. Use disposable Ubuntu 24.04/Debian environments for additional distro-sensitive cases. Do not inject faults into the sponsored VPS.
+4. Ask FastVPS engineers whether the three scenarios and handoff report fit actual support intake and plan boundaries.
+5. Continue describing the tool as an independent engineering beta. Do not claim production readiness, official endorsement, provider responsibility or universal secret removal.
+
+## Earlier v0.2 status
+
+The preceding v0.2 test counts and detailed engineering findings are kept in [the historical QA report](COMPLETE_QA_REPORT.md) and [v0.2 audit](V0_2_ENGINEERING_AUDIT.md); they are not replaced by v0.3 results.

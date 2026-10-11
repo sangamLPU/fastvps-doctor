@@ -1,7 +1,8 @@
-# FastVPS Doctor v0.2 complete QA report
+# FastVPS Doctor QA report: v0.2 history and v0.3 validation
 
 **Assessment date:** 11 October 2026
-**Result:** Final code/test revalidation passed on WSL Ubuntu 26.04; Ubuntu 24.04.5, Debian, GitHub Actions, and the sponsored VPS remain unverified.
+**Historical v0.2 result:** Final code/test revalidation passed on WSL Ubuntu 26.04; Ubuntu 24.04.5, Debian, GitHub Actions, and the sponsored VPS remained unverified.
+**Current v0.3 results:** See the appended v0.3 section for the final 154-test Windows and 158-test WSL results, final wheel identity, and outstanding compatibility gaps.
 **No sponsored VPS, FastVPS infrastructure, or remote server was accessed. This review did not push to GitHub.**
 
 ## Source snapshot and preservation
@@ -119,3 +120,60 @@ The workflow is configured, not executed. No GitHub dispatch or push was made. L
 ## QA conclusion
 
 The earlier WSL access failure was an execution-context access denial. WSL is now usable, and final candidate source/tests passed on WSL Ubuntu 26.04, including Linux integration tests and an installed wheel. This supports a controlled beta candidate for engineering evaluation. The sponsored Ubuntu 24.04.5 host, Ubuntu 24.04/Debian CI containers, and GitHub Actions results remain unverified. **Do not claim production readiness or verified compatibility with the sponsored server.** See [release readiness](RELEASE_READINESS.md) and [gap analysis](GAP_ANALYSIS.md).
+
+---
+
+# v0.3.0 Linux validation and QA
+
+**Assessment date:** 11 October 2026
+**Source:** v0.3.0 working tree (Windows checkout)
+**Linux copy:** `$HOME/fastvps-doctor-v03-qa-20261011` on the WSL native filesystem
+**Remote access:** No sponsored VPS, FastVPS service, or other remote server was accessed. No commit or push was made.
+
+The v0.2 results above are retained as historical evidence. The counts below include the v0.3 scenario-report, privacy, timeout and disposable-loopback additions.
+
+## Executed tests and quality checks
+
+| Environment | Exact result | Notes |
+| --- | --- | --- |
+| Windows 11 / CPython 3.13.7 | **154 passed, 4 deselected** | `python -m pytest -q -m "not integration"`; all four opt-in Linux tests were excluded. This is not Linux evidence. |
+| WSL Ubuntu 26.04 / CPython 3.14.4 | **158 passed, 0 skipped, 5.24 seconds** | Full suite with `FASTVPS_DOCTOR_INTEGRATION=1`, including installed CLI, Linux process-group timeout, a real loopback HTTP response and the live-local demo. |
+| Windows and WSL source quality | **Passed** | Ruff lint, Ruff formatting check and mypy; WSL mypy checked 19 source files. |
+| WSL package dependencies/lock | **Passed** | `pip check`: no broken requirements. `uv lock --check --offline`: resolved 28 packages and verified the lock. |
+| GitHub Actions | **Not executed** | Workflow configuration was inspected, not dispatched. |
+
+Four Linux integration tests consist of two pre-existing installed-CLI/process-timeout tests plus v0.3 loopback checks. The loopback tests start a temporary HTTP server on `127.0.0.1`, return a controlled 503 to a `HEAD` request, and stop the server. No external address or customer service is contacted.
+
+## Packaging, CLI and report checks
+
+- A fresh isolated WSL virtual environment was created. The WSL image did not provide `ensurepip`; no OS package or system setting was changed. Pip was bootstrapped from a PyPI wheel after checking its SHA-256 against PyPI JSON metadata, then dependencies were installed only into the project venv.
+- The final v0.3.0 wheel was built and installed from the wheel file. It is 66,240 bytes; SHA-256 `b452ede820bd0ddf377321797719cfdbb2ed2ef4f0768e5de2634f666a7232a9`. Its generated CLI returned `FastVPS Doctor 0.3.0 (independent, unofficial contribution)`. A real storage JSON report from this exact wheel parsed and had mode `0600`.
+- The generated `fastvps-doctor` console entry point returned `FastVPS Doctor 0.3.0`.
+- The website-unavailable, service-crash and storage scenarios each ran real unprivileged WSL diagnostics. JSON schema 1.0 validated and Markdown rendered. New JSON/Markdown report files had POSIX mode `0600` and did not contain checked markers for the WSL username/home, loopback IP, credential assignment or private-key block.
+- The selected read-only `systemd-logind.service` inspection reported `active`, `running`, `NRestarts=0`, matching a direct `systemctl show` read. Its timeline may still be incomplete due to WSL journald availability/retention.
+- Root storage reported 0.3% space and 0.1% inode usage. `df -P /` and `df -Pi /` displayed 1% for both after integer rounding. This is a comparison on the WSL root filesystem only.
+
+## v0.3 scenario performance sample
+
+Runs used the installed wheel on WSL Ubuntu 26.04 / Python 3.14.4. Command counts wrap actual calls through `CommandRunner._invoke`. RSS includes Python and imported modules. The HTTP request is a loopback socket request, not an external command.
+
+| Scenario/options | Time | Peak process RSS | External commands | JSON | Markdown |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Website unavailable; one unit, journals, port and opted-in loopback HEAD | 0.288 s | 36.7 MiB | 3 | 6,481 bytes | 4,972 bytes |
+| Service crash; one unit and bounded journal | 0.209 s | 36.3 MiB | 3 | 3,386 bytes | 3,169 bytes |
+| Storage; no related service | 0.006 s | 36.5 MiB | 0 | 3,375 bytes | 3,181 bytes |
+
+The JSON byte count includes its final newline. Timeline contents may change with available journal events. The runner caps a subprocess timeout at five seconds and separately bounds cleanup. These are single WSL measurements, not performance guarantees. Optional configuration validation adds a command.
+
+## Mocked, skipped and outstanding checks
+
+- Synthetic tests mock systemd properties, malformed/permission-denied journal output, event correlations, service failures, high disk/inode use, read-only filesystems and secret-bearing text. These cases did not alter a real service or filesystem.
+- The live local HTTP 503 tests use a disposable loopback server. They validate the local HTTP path but do not validate a public website, Nginx, DNS, TLS or provider network route.
+- Four tests were deselected on Windows because they require Linux. None were skipped in the WSL full-suite run.
+- Ubuntu 24.04, Debian 12 and Debian 13 integration images and the GitHub workflow remain untested until the workflow runs. Python 3.11/3.12 Linux behavior is not established by WSL Python 3.14.4.
+- The user's report of a sponsored Ubuntu 24.04.5 / Python 3.12.3 smoke test is user-reported only. It is not independently confirmed by these commands.
+- No full filesystem, OOM, invalid configuration, network outage or production service failure was induced. Those remain restricted to mocks or separately disposable environments. Real FastVPS support suitability, plan scope and engineering approval remain unreviewed.
+
+## v0.3 QA conclusion
+
+The current code passed its Windows unit/fixture checks and a separate WSL Linux suite, wheel install, live loopback example and report-permission checks. This supports a **beta candidate for engineering evaluation** only. CI images, GitHub Actions, the sponsored VPS and production conditions remain unverified. See [v0.3 release readiness](RELEASE_READINESS.md), [the gap analysis](GAP_ANALYSIS.md), [product focus](V0_3_PRODUCT_FOCUS.md), and [the limitations](LIMITATIONS.md).

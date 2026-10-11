@@ -1,51 +1,59 @@
-# FastVPS Doctor v0.2 beta-candidate readiness
+# FastVPS Doctor v0.3.0 beta readiness
 
 **Assessment date:** 11 October 2026
-**Classification: BETA CANDIDATE FOR ENGINEERING EVALUATION**
+**Classification:** Beta candidate for engineering evaluation
+**Production readiness:** Not established
+**Official FastVPS status:** Independent and unofficial
 
 ## Decision
 
-The reviewed code and tests are suitable to publish as a controlled, clearly labelled beta candidate for engineering evaluation. This does not establish production readiness, official FastVPS.gr support, security certification, or verified compatibility with the sponsored VPS. The project is independent and unofficial.
+The current working tree is suitable for **engineering evaluation after code review**. It adds a focused three-scenario troubleshooting flow and support report while retaining the v0.2 diagnostic commands. The evidence does not establish production readiness, security certification, official FastVPS support, or compatibility with every Ubuntu/Debian installation.
 
-Linux execution evidence is from an unprivileged WSL Ubuntu 26.04 / Python 3.14.4 environment. The user's sponsored server is Ubuntu 24.04.5. The GitHub Actions integration matrix is configured for Ubuntu 24.04, Debian 12 and Debian 13, but those jobs have not run. Do not represent those environments as tested until actual results exist.
+No sponsored VPS, FastVPS infrastructure, or remote server was accessed. No test changed systemd configuration, stopped a service, exhausted storage, caused OOM, or changed network/security configuration. No commit or push was made.
 
-## Evidence for this candidate
+## Verification evidence
 
-- WSL Ubuntu 26.04 / CPython 3.14.4: **136 passed, 0 skipped**, including the opted-in Linux integration tests, from a separate copy on the WSL native filesystem.
-- Linux quality checks: Ruff lint, Ruff format check, mypy across 18 source files, and dependency consistency check passed.
-- Linux coverage in the final test run: **92.5% statement coverage** (1,849 statements, 138 missed) and **90% branch-inclusive coverage** (640 branches, 80 partial).
-- Linux packaging smoke: built a wheel from the reviewed source, installed it into a fresh isolated virtual environment, ran the generated `fastvps-doctor` entry point, exercised JSON diagnosis and JSON/Markdown report generation, and verified uninstall.
-- POSIX JSON and Markdown report files were created with mode `0600`. The JSON diagnosis parsed as schema 2.0 with nine checks.
-- Windows 11 / CPython 3.13.7: **134 passed, 2 skipped**; the two skips are Linux-only integration tests. Ruff, formatting, mypy, and `pip check` passed.
-- The workflow file was reviewed and has separate Ubuntu quality and Linux integration jobs. Workflow execution is **pending**.
-- No sponsored VPS, FastVPS infrastructure, or other remote server was accessed. No destructive failure was induced.
+| Environment | Result | What was exercised |
+| --- | --- | --- |
+| Windows 11, CPython 3.13.7 | **154 passed; 4 deselected** | Unit and fixture tests. Four Linux integration tests were excluded by the `not integration` selection. Ruff, formatting, mypy and `pip check` passed. These results do not establish Linux behavior. |
+| WSL Ubuntu 26.04, CPython 3.14.4 | **158 passed; 0 skipped** | Full suite including installed CLI, process-group timeout cleanup, actual loopback HTTP probe, and complete live-local 503 demo. Linux Ruff, formatting, mypy and `pip check` passed. |
+| WSL package installation | **Passed** | Built `fastvps_doctor-0.3.0-py3-none-any.whl`, installed that wheel in an isolated virtual environment, ran the generated console script and verified version 0.3.0. No system package was installed. |
+| WSL reports and diagnostics | **Passed** | Website, service-crash and storage reports were generated from read-only WSL checks. JSON schema 1.0 parsed; Markdown rendered; POSIX report modes were `0600`; no checked WSL identity markers were present. |
+| GitHub Actions | **Configured; not run** | Ubuntu quality matrix uses Python 3.11–3.13. Separate unprivileged integration images are `ubuntu:24.04`, `debian:12` and `debian:13`. Workflow configuration is not a passing result. |
+| Sponsored FastVPS VPS | **Not independently verified** | You reported a manual smoke test on Ubuntu 24.04.5/Python 3.12.3, including installation, reports, file mode and comparisons with native utilities. You also reported incomplete SSH/UFW evidence and extra unsupported mount metrics. This review did not reproduce those observations or connect to that server. |
 
-The evidence supports a limited statement: this candidate passed its current automated suite and smoke checks in WSL Ubuntu 26.04. It does not prove behavior on Ubuntu 24.04.5, Debian, every Linux configuration, or production systems. See the [complete QA report](COMPLETE_QA_REPORT.md) for test boundaries and the [gap analysis](GAP_ANALYSIS.md) for implementation status.
+The WSL integration suite exercised a temporary loopback-only server which deliberately returned HTTP 503. The server was bound to `127.0.0.1` on an ephemeral port and shut down after the request. A separate read-only WSL service check reported `systemd-logind.service` active/running with `NRestarts=0`, matching `systemctl show`. The root storage reading (space 0.3%, inodes 0.1%) was directionally consistent with `df` output rounded to 1%; this comparison is specific to the WSL filesystem.
 
-## CI configuration and outstanding results
+## Measured scenario cost in WSL
 
-`.github/workflows/ci.yml` configures:
+Each timing below is one unprivileged WSL 26.04 run using the installed v0.3.0 wheel. Peak RSS includes Python and imported dependencies. Command count wraps the real central subprocess runner; the loopback HTTP request is not an external command.
 
-- Ubuntu unit, lint, format and type-check jobs on Python 3.11, 3.12 and 3.13.
-- Independent disposable Docker integration jobs using `ubuntu:24.04`, `debian:12` and `debian:13` images, running as an unprivileged user.
-- Workflow token permission limited to `contents: read`.
+| Scenario | Elapsed | Process peak RSS | External commands | JSON bytes | Markdown bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Website unavailable, service + journal + loopback HEAD | 0.288 s | 36.7 MiB | 3 | 6,481 | 4,972 |
+| Service crash, service + bounded journal | 0.209 s | 36.3 MiB | 3 | 3,386 | 3,169 |
+| Storage without related service | 0.006 s | 36.5 MiB | 0 | 3,375 | 3,181 |
 
-Configuration is not a passing result. Local Docker was unavailable and GitHub Actions was not dispatched. After you push the reviewed commit, inspect every matrix job. Fix failures before making compatibility claims for those images.
+The maximum configured timeout for a subprocess is five seconds; `CommandRunner` also bounds process cleanup and output. These measurements are a small WSL sample, not a latency or memory guarantee for other hosts. Optional configuration validation adds one bounded command.
 
-## Before presenting the candidate
+## Remaining validation gaps
 
-1. Review the local v0.2 beta-candidate commit and its 55-file summary. The final secret scan covered those exact files.
-2. Push the reviewed commit yourself and retain the GitHub Actions run URL and all Ubuntu/Debian matrix results. Do not present a failed or incomplete matrix as green.
-3. If stating that the tool was exercised on the sponsored Ubuntu 24.04.5 host, personally run only the normal-user read-only commands in [the VPS guide](LINUX_VPS_TESTING_GUIDE.md). The host has not been tested in this review.
-4. Share the project as an independent beta candidate for engineering evaluation. State the WSL version actually tested and the remaining platform gaps. Do not imply endorsement, adoption, production readiness, or a determination of provider responsibility.
-5. Ask a Linux engineer to review operational usefulness, permissions, systemd/journal behavior, and privacy limitations before any broader use.
+- GitHub Actions must run after you publish the reviewed commit. Retain the workflow URL and inspect every Python and Linux image job.
+- Ubuntu 24.04.5, Debian 12, Debian 13, Python 3.11/3.12 on Linux, and the sponsored server were not tested by this review. WSL Ubuntu 26.04/Python 3.14.4 is a distinct environment.
+- WSL does not reproduce a VPS provider kernel, networking, cgroup policy, systemd layout, journald retention, UFW policy, or managed plan scope.
+- No real Nginx/Apache/SSH syntax failure, production app route, filesystem exhaustion, inode exhaustion, OOM event, public reachability failure or real service crash was induced. Failure cases use deterministic mocks/fixtures; a disposable local 503 HTTP server was the only live scenario fault.
+- Redaction is pattern-based and allowlist-based, not a universal secret scanner. Always read the entire report before sharing it.
+- systemd and journal access can be incomplete for an unprivileged user. Missing or inaccessible logs do not prove that no event occurred.
 
-## Safe boundary for the sponsored VPS
+## Before showing this candidate to FastVPS engineers
 
-The guide is limited to ordinary-user, read-only checks and local report creation. Do not use `sudo` or root. Do not stop or reconfigure services, change SSH/firewall/networking, reboot, install packages, simulate failures, invoke config validators, run APT simulation, or enable `FASTVPS_DOCTOR_INTEGRATION=1`. If a command requests elevated privileges or proposes a system change, stop. Keep generated reports private and review them before sharing.
+1. Review every change in the uncommitted diff, including the product-focus, report and limitations wording. Confirm no unrelated local files are included.
+2. Run the repository publication scan on the exact files you plan to publish. Treat test strings such as `sample-secret` as synthetic fixtures; do not treat the scan as a guarantee.
+3. Publish only after your own review, then inspect all GitHub Actions results for Ubuntu 24.04, Debian 12 and Debian 13. Fix failures before describing those images as tested.
+4. Ask FastVPS engineers to evaluate the three workflows, support usefulness, uncertainty language, report privacy, non-root permissions, systemd/journal behavior and whether any wording implies provider responsibility.
+5. If you need a sponsored-server confirmation, personally run only the normal-user read-only checks in [the Linux validation guide](LINUX_VPS_TESTING_GUIDE.md). Do not induce failure, use `sudo`, run package simulations, or make service/network/security changes there.
+6. Describe the project as an independent beta candidate for engineering evaluation. Do not call it production-ready or an official/endorsed FastVPS product.
 
-The tool observes guest-visible signals only. It cannot determine what a customer's plan includes or assign provider responsibility. Pattern-based report redaction is not universal secret detection.
+## Safe operating boundary
 
-## Release distinction
-
-This is a candidate for a controlled engineering beta, not an officially supported FastVPS product. Automated success and one WSL Linux environment are useful evidence, not production approval. Ubuntu 24.04.5, Debian 12/13, GitHub Actions results, and the sponsored VPS remain unverified until their respective tests have actually run.
+Use an ordinary account. The tool does not need SSH credentials, FastVPS account access or external telemetry. Do not run `--live-local` on the sponsored VPS; it starts a temporary HTTP service. Do not use the integration-test environment flag there. Review any report privately and remove details you do not intend to share.
