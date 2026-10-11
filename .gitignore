@@ -6,6 +6,8 @@ __pycache__/
 venv/
 env/
 ENV/
+.python-env/
+.venv-*/
 
 # Python packaging and build output
 build/
@@ -22,10 +24,14 @@ pip-wheel-metadata/
 .hypothesis/
 .tox/
 .nox/
-.coverage
+.pyre/
+.pytype/
+.cache/
 .coverage.*
+.coverage
 coverage.xml
 htmlcov/
+test-results/
 
 # Local credentials and private configuration
 .env
@@ -35,6 +41,7 @@ htmlcov/
 .aws/
 .config/gcloud/
 .netrc
+.envrc
 .npmrc
 .pypirc
 credentials.json
@@ -47,14 +54,17 @@ secrets.yml
 secrets.txt
 *.pem
 *.key
+*.p8
 *.p12
 *.pfx
+*.ppk
+*.asc
+*.gpg
 *.jks
 *.keystore
-id_rsa
-id_dsa
-id_ecdsa
-id_ed25519
+id_*
+config.local.toml
+*.local
 
 # Locally generated diagnostic reports (keep the checked-in simulated example)
 support-report*.json
@@ -65,6 +75,14 @@ fastvps-doctor-review*.json
 fastvps-doctor-review*.md
 diagnostic-report*.json
 diagnostic-report*.md
+report*.json
+report*.md
+*.report.json
+*.report.md
+*.diagnostic.json
+*.diagnostic.md
+generated-reports/
+reports/
 
 # Temporary files and logs
 *.log
@@ -74,6 +92,8 @@ diagnostic-report*.md
 *.swo
 *.orig
 *.rej
+*.sw?
+*~
 
 # Editor and operating-system files
 .idea/

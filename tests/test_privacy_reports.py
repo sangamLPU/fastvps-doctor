@@ -2,10 +2,21 @@ import json
 import math
 import os
 import stat
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastvps_doctor.models import CheckStatus, DiagnosticCheck, Finding, Severity
+from fastvps_doctor.models import (
+    CheckStatus,
+    DiagnosticCheck,
+    Finding,
+    IncidentAnalysis,
+    IncidentEvent,
+    IncidentEventType,
+    IncidentHypothesis,
+    IncidentInformation,
+    ProblemCategory,
+    Severity,
+)
 from fastvps_doctor.privacy import sanitize_checks, sanitize_findings, sanitize_ticket_reference
 from fastvps_doctor.reports import (
     build_report,
@@ -207,16 +218,145 @@ def test_distribution_and_kernel_identifiers_do_not_publish_host_suffixes() -> N
             )
         ]
     )
+    assert report.distribution.startswith("debian")
+    assert report.distribution != "Unsupported platform"
     assert "private.example" not in report.json_document()
     assert "debian" in report.json_document()
 
 
 def test_ticket_reference_is_restricted_to_identifier_characters() -> None:
     assert sanitize_ticket_reference("FV-1234") == "FV-1234"
-    result = sanitize_ticket_reference("FV-1234;token=secret <script>")
-    assert result is not None
-    assert all(char.isalnum() or char in ".-_" for char in result)
-    assert "secret" not in result
+    assert sanitize_ticket_reference("123456789") == "123456789"
+    assert sanitize_ticket_reference("FV-1234;token=secret <script>") is None
+
+
+def test_ticket_reference_drops_realistic_synthetic_credentials() -> None:
+    sensitive_values = (
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "github_pat_abcdefghijklmnopqrstuvwxyz0123456789",
+        "xoxb-123456789012345678901234",
+        "AKIA1234567890ABCDEF",
+        "Authorization: Bearer abcdef0123456789",
+        "Password=hunter2",
+        "my-private-key",
+    )
+    for value in sensitive_values:
+        assert sanitize_ticket_reference(value) is None
+
+
+def test_report_does_not_export_credential_shaped_ticket_reference() -> None:
+    report = build_report([], ticket_reference="ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+    assert report.ticket_reference is None
+    assert "ghp_" not in report.json_document()
+
+
+def test_v2_report_redacts_incident_context_and_keeps_structured_timeline() -> None:
+    start = datetime(2026, 10, 11, 11, 0, tzinfo=UTC)
+    information = IncidentInformation(
+        start_time_utc=start,
+        affected_service="customer-private-api.service",
+        problem_category=ProblemCategory.APPLICATION,
+        description=(
+            "Password=hunter2 token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 "
+            "Authorization: Bearer abcdef0123456789 email=alice@example.net "
+            "path=/home/alice/app host=private.customer.example IP=203.0.113.20"
+        ),
+    )
+    analysis = IncidentAnalysis(
+        service="customer-private-api",
+        window_seconds=3600,
+        generated_at_utc=start + timedelta(hours=1),
+        complete=True,
+        events=[
+            IncidentEvent(
+                timestamp_utc=start + timedelta(minutes=10),
+                classification=IncidentEventType.SERVICE_FAILURE,
+                component="private.customer.example",
+                evidence_summary="Credential=private-value; service failure transition recorded.",
+                correlation_explanation="token=timeline-secret",
+            )
+        ],
+        hypotheses=[
+            IncidentHypothesis(
+                statement="Possible issue on private.customer.example with password=hunter2.",
+                start_time_utc=start,
+                end_time_utc=start + timedelta(minutes=10),
+                evidence=["api key=another-secret"],
+                alternatives=["user=alice at /home/alice"],
+                next_steps=["Review private.customer.example locally."],
+            )
+        ],
+        note="Raw logs were discarded.",
+    )
+    report = build_report(
+        [],
+        incident_information=information,
+        incident_analysis=analysis,
+    )
+    document = report.json_document()
+    markdown = render_markdown(report)
+    for secret in (
+        "hunter2",
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "abcdef0123456789",
+        "alice@example.net",
+        "/home/alice/app",
+        "private.customer.example",
+        "203.0.113.20",
+        "private-value",
+        "timeline-secret",
+        "another-secret",
+    ):
+        assert secret not in document
+        assert secret not in markdown
+    assert report.schema_version == "2.0"
+    assert report.incident_information is not None
+    assert report.incident_information.affected_service == "[REDACTED SERVICE]"
+    assert report.incident_analysis is not None
+    assert report.incident_analysis.service == "[REDACTED SERVICE]"
+    assert report.incident_analysis.events[0].component == "[REDACTED SERVICE]"
+    assert "customer-private-api" not in document
+    assert "customer-private-api" not in markdown
+    assert "incident_analysis" in document
+    assert "Support handoff" in markdown
+    assert "Incident timeline" in markdown
+
+
+def test_report_redacts_unlabelled_tokens_and_private_key_blocks() -> None:
+    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    private_key_material = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+    private_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        + private_key_material
+        + "\n-----END OPENSSH PRIVATE KEY-----"
+    )
+    information = IncidentInformation(
+        description=(
+            f"Customer pasted {token}, a bearer JWT "
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue "
+            f"and this key:\n{private_key}\n"
+            "DATABASE_PASSWORD=database-secret-value "
+            "GITHUB_TOKEN=github-secret-value "
+            "AWS_SECRET_ACCESS_KEY=aws-secret-value"
+        )
+    )
+
+    report = build_report([], incident_information=information)
+    document = report.json_document()
+    markdown = render_markdown(report)
+
+    for secret in (
+        token,
+        "eyJhbGciOiJIUzI1NiJ9",
+        private_key_material,
+        "database-secret-value",
+        "github-secret-value",
+        "aws-secret-value",
+    ):
+        assert secret not in document
+        assert secret not in markdown
+    assert "REDACTED PRIVATE KEY" in document
+    assert "REDACTED TOKEN" in document
 
 
 def test_report_file_is_exclusive_and_private_on_posix(tmp_path: Path, monkeypatch) -> None:
@@ -282,3 +422,23 @@ def test_incomplete_check_keeps_unknown_status_even_with_a_finding() -> None:
     assert report.findings[0].finding_id == "SYS-001"
     assert report.checks[0].status == CheckStatus.UNKNOWN
     assert "system.resources" in report.support_summary.unavailable_checks
+    assert "system.resources" in report.support_handoff.unavailable_checks
+    assert "[HOSTNAME]" not in report.support_handoff.unavailable_checks
+
+
+def test_handoff_keeps_known_check_ids_and_drops_untrusted_values() -> None:
+    report = build_report(
+        [],
+        incident_analysis=IncidentAnalysis(
+            service="nginx.service",
+            window_seconds=3600,
+            generated_at_utc=datetime.now(UTC),
+            complete=False,
+            unavailable_sources=["service_journal", "kernel_journal"],
+        ),
+    )
+
+    assert "Incident source: service_journal" in report.support_handoff.unavailable_checks
+    assert "Incident source: kernel_journal" in report.support_handoff.unavailable_checks
+    assert report.incident_analysis.service == "nginx.service"
+    assert "[HOSTNAME]" not in report.support_handoff.unavailable_checks

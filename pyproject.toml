@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fastvps-doctor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Offline-first Linux diagnostics and privacy-conscious support reports for VPS customers."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,8 +31,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "pytest-cov>=6.0,<8",
   "mypy>=1.13,<2",
-  "pytest>=8.3,<9",
+  "pytest>=8.3,<10",
   "ruff>=0.8,<1",
   "types-psutil>=6.1,<8",
 ]
@@ -45,6 +46,7 @@ packages = ["src/fastvps_doctor"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-ra"
 markers = ["integration: opt-in tests against a disposable Linux host/container"]
 

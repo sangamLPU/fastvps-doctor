@@ -7,6 +7,7 @@ must be added here with a fixed executable, fixed argument shape, and validation
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import math
 import os
 import re
@@ -149,13 +150,59 @@ class CommandRunner:
             raise ValueError("Service is not on the allowlist.")
         return self._invoke("systemctl", ("is-active", unit), timeout)
 
+    def systemd_unit_show(self, unit: str, timeout: float = 3.0) -> CommandResult:
+        """Read a small fixed set of properties for one validated systemd unit."""
+        unit = safe_systemd_unit(unit)
+        properties = "Id,LoadState,ActiveState,SubState,UnitFileState,Result,NRestarts"
+        return self._invoke(
+            "systemctl",
+            ("show", "--no-pager", f"--property={properties}", unit),
+            timeout,
+        )
+
     def recent_service_logs(self, unit: str) -> CommandResult:
-        if unit not in ALLOWED_SERVICES:
-            raise ValueError("Service is not on the allowlist.")
+        unit = safe_systemd_unit(unit)
         return self._invoke(
             "journalctl",
             ("--no-pager", "--quiet", "-u", unit, "-n", "40", "--since=-1h", "--output=cat"),
             3.0,
+        )
+
+    def recent_service_events(self, unit: str, window_seconds: int) -> CommandResult:
+        """Read bounded structured journal records for one selected unit."""
+        unit = safe_systemd_unit(unit)
+        since = _journal_since(window_seconds)
+        return self._invoke(
+            "journalctl",
+            (
+                "--no-pager",
+                "--quiet",
+                "--unit",
+                unit,
+                f"--since={since}",
+                "--output=json",
+                "-n",
+                "200",
+            ),
+            5.0,
+        )
+
+    def recent_kernel_events(self, window_seconds: int) -> CommandResult:
+        """Read bounded kernel journal records without restricting to the current boot."""
+        since = _journal_since(window_seconds)
+        return self._invoke(
+            "journalctl",
+            (
+                "--no-pager",
+                "--quiet",
+                "--priority=warning..emerg",
+                f"--since={since}",
+                "--output=json",
+                "-n",
+                "200",
+                "_TRANSPORT=kernel",
+            ),
+            5.0,
         )
 
     def validate_nginx(self) -> CommandResult:
@@ -169,6 +216,33 @@ class CommandRunner:
     def validate_ssh(self) -> CommandResult:
         return self._invoke("sshd", ("-t",), 5.0)
 
+    def effective_ssh_config(
+        self,
+        context: tuple[str, str, str, str, int] | None = None,
+        timeout: float = 5.0,
+    ) -> CommandResult:
+        """Return allowlisted effective sshd settings, optionally for one connection."""
+        arguments = ["-T"]
+        if context is not None:
+            user, host, address, local_address, local_port = context
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}", user):
+                raise ValueError("SSH context user is not a valid local account name.")
+            host = safe_hostname(host)
+            try:
+                address = str(ipaddress.ip_address(address))
+                local_address = str(ipaddress.ip_address(local_address))
+            except ValueError as exc:
+                raise ValueError("SSH context addresses must be literal IP addresses.") from exc
+            if not 1 <= local_port <= 65535:
+                raise ValueError("SSH context local port must be between 1 and 65535.")
+            arguments.extend(
+                (
+                    "-C",
+                    f"user={user},host={host},addr={address},laddr={local_address},lport={local_port}",
+                )
+            )
+        return self._invoke("sshd", tuple(arguments), timeout)
+
     def firewall_status(self) -> CommandResult:
         return self._invoke("ufw", ("status",), 3.0)
 
@@ -181,6 +255,29 @@ def find_executable(executable: str) -> str | None:
     if not sys.platform.startswith("linux") or not re.fullmatch(r"[A-Za-z0-9_.+-]+", executable):
         return None
     return shutil.which(executable, path=TRUSTED_EXECUTION_PATH)
+
+
+def safe_systemd_unit(value: str) -> str:
+    """Accept a unit identifier, never a path, option, or command fragment."""
+    if (
+        not isinstance(value, str)
+        or len(value) > 128
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@-]*", value)
+    ):
+        raise ValueError("Enter a valid systemd unit name.")
+    return value if "." in value else f"{value}.service"
+
+
+def _journal_since(window_seconds: int) -> str:
+    if not isinstance(window_seconds, int) or isinstance(window_seconds, bool):
+        raise ValueError("Journal window must be an integer number of seconds.")
+    if not 60 <= window_seconds <= 86400:
+        raise ValueError("Journal window must be between one minute and 24 hours.")
+    if window_seconds % 3600 == 0:
+        return f"-{window_seconds // 3600}h"
+    if window_seconds % 60 == 0:
+        return f"-{window_seconds // 60}m"
+    return f"-{window_seconds}s"
 
 
 def safe_hostname(value: str) -> str:

@@ -17,6 +17,7 @@ class Thresholds(BaseModel):
     inode_critical_percent: float = Field(default=90.0, ge=2, le=100)
     low_available_memory_percent: float = Field(default=10.0, ge=1, le=50)
     memory_psi_warning_percent: float = Field(default=10.0, gt=0, le=100)
+    swap_warning_percent: float = Field(default=80.0, ge=1, le=100)
 
     @model_validator(mode="after")
     def critical_thresholds_must_exceed_warning(self) -> Thresholds:

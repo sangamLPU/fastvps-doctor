@@ -35,6 +35,29 @@ def _pressure_avg10(resource: str) -> float | None:
 
 
 def collect_system() -> list[DiagnosticCheck]:
+    if not sys.platform.startswith("linux"):
+        return [
+            DiagnosticCheck(
+                check_id="system.resources",
+                category="system",
+                status=CheckStatus.SKIPPED,
+                summary="Linux resource checks are unavailable on this platform.",
+                metrics={},
+                note="No host resource counters were collected outside Linux.",
+            ),
+            DiagnosticCheck(
+                check_id="system.identity",
+                category="system",
+                status=CheckStatus.SKIPPED,
+                summary="Linux distribution checks are unavailable on this platform.",
+                metrics={
+                    "distribution": linux_distribution(),
+                    "kernel_release": None,
+                    "python_supported": None,
+                },
+            ),
+        ]
+
     cpu_percent: float | None
     try:
         cpu_percent = float(psutil.cpu_percent(interval=0.1))
@@ -60,7 +83,7 @@ def collect_system() -> list[DiagnosticCheck]:
     load_15m: float | None
     try:
         load_1m, load_5m, load_15m = psutil.getloadavg()
-    except (AttributeError, OSError, psutil.Error):
+    except (AttributeError, OSError, psutil.Error, RuntimeError):
         load_1m = load_5m = load_15m = None
 
     try:
@@ -106,13 +129,14 @@ def collect_system() -> list[DiagnosticCheck]:
             check_id="system.resources",
             category="system",
             status=CheckStatus.PASS if resources_available else CheckStatus.UNKNOWN,
-            summary="Collected CPU, memory, swap, load, uptime and available pressure indicators.",
+            summary="Collected available CPU, memory, swap, load, uptime and pressure indicators.",
             metrics=metrics,
             note=(
                 "CPU is a brief sample; a high single sample is not treated as an incident."
                 if resources_available
                 else "One or more core resource counters could not be read."
-            ),
+            )
+            + (" Load-average counters were unavailable." if load_1m is None else ""),
         ),
         DiagnosticCheck(
             check_id="system.identity",

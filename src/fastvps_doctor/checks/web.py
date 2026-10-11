@@ -46,7 +46,7 @@ def collect_web(required_port: int | None = None) -> list[DiagnosticCheck]:
     metrics["https_443_reachable"] = _loopback_reachable(443)
     metrics["required_port_supplied"] = required_port is not None
     metrics["required_port"] = required_port
-    status = CheckStatus.PASS if listeners.status == CheckStatus.PASS else CheckStatus.SKIPPED
+    status = CheckStatus.PASS if listeners.status == CheckStatus.PASS else CheckStatus.UNKNOWN
     return [
         DiagnosticCheck(
             check_id="web.local",
@@ -54,6 +54,10 @@ def collect_web(required_port: int | None = None) -> list[DiagnosticCheck]:
             status=status,
             summary="Checked local HTTP/HTTPS TCP reachability and selected port listeners.",
             metrics=metrics,
-            note="Only loopback TCP handshakes are attempted; TLS contents and application routes are not inspected.",
+            note=(
+                "Only loopback TCP handshakes are attempted; TLS contents and application routes are not inspected."
+                if status == CheckStatus.PASS
+                else "Loopback handshakes ran, but listener inventory was unavailable or permission-restricted."
+            ),
         )
     ]

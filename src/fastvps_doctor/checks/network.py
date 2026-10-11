@@ -37,6 +37,28 @@ def _has_default_route() -> bool | None:
         return None
 
 
+def _has_ipv6_default_route() -> bool | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with Path("/proc/net/ipv6_route").open("rb") as route_file:
+            route_text = route_file.read(16384).decode("ascii", "ignore")
+        for line in route_text.splitlines():
+            fields = line.split()
+            if len(fields) < 10 or fields[0] != "0" * 32 or fields[1] != "00":
+                continue
+            try:
+                flags = int(fields[8], 16)
+            except ValueError:
+                continue
+            # Linux IPv6 route flags use RTF_UP (bit 0) and RTF_REJECT (bit 9).
+            if flags & 0x1 and not flags & 0x200:
+                return True
+        return False
+    except OSError:
+        return None
+
+
 def collect_network(
     resolve: str | None = None,
     connect: tuple[str, int] | None = None,
@@ -55,6 +77,7 @@ def collect_network(
                     "local_ipv4_address_count": None,
                     "local_ipv6_address_count": None,
                     "default_route_present": None,
+                    "ipv6_default_route_present": None,
                     "resolver_readable": None,
                     "resolver_nameserver_count": None,
                     "dns_test_requested": resolve is not None,
@@ -110,12 +133,14 @@ def collect_network(
             pass
 
     route = _has_default_route()
+    ipv6_route = _has_ipv6_default_route()
     check_metrics: dict[str, str | int | float | bool | None] = {
         "interface_count": len(stats),
         "interfaces_up": up_count,
         "local_ipv4_address_count": ipv4_count,
         "local_ipv6_address_count": ipv6_count,
         "default_route_present": route,
+        "ipv6_default_route_present": ipv6_route,
         "resolver_readable": resolver_readable,
         "resolver_nameserver_count": resolver_count,
         "dns_test_requested": resolve is not None,
@@ -188,13 +213,14 @@ def collect_network(
                 check_metrics["tcp_test_succeeded"] = False
             check_metrics["tcp_test_timed_out"] = False
 
-    if not interfaces_available or (
-        sys.platform.startswith("linux") and (route is None or not resolver_readable)
-    ):
+    route_found = route is True or ipv6_route is True
+    route_missing = route is False and ipv6_route is False
+    route_inconclusive = not route_found and not route_missing
+    if not interfaces_available or (route_inconclusive or not resolver_readable):
         status = CheckStatus.UNKNOWN
     elif (
         (up_count == 0)
-        or (sys.platform.startswith("linux") and route is False)
+        or route_missing
         or (resolver_readable and resolver_count == 0)
         or check_metrics.get("dns_test_succeeded") is False
         or check_metrics.get("dns_test_timed_out") is True
@@ -223,7 +249,12 @@ def collect_network(
 
 
 def collect_listeners(ports: set[int] | None = None) -> DiagnosticCheck:
-    watched = ports or {22, 53, 80, 443, 3306, 5432, 6379, 8080}
+    watched = ports if ports is not None else {22, 53, 80, 443, 3306, 5432, 6379, 8080}
+    if any(
+        not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535
+        for port in watched
+    ):
+        raise ValueError("Listener ports must be integers between 1 and 65535.")
     if not sys.platform.startswith("linux"):
         return DiagnosticCheck(
             check_id="network.listeners",

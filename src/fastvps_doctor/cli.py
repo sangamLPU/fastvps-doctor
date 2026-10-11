@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -15,15 +16,22 @@ from rich.table import Table
 from fastvps_doctor import __version__
 from fastvps_doctor.checks.network import collect_listeners, collect_network
 from fastvps_doctor.checks.security import collect_security
-from fastvps_doctor.checks.services import collect_services
+from fastvps_doctor.checks.services import SERVICE_DEFINITIONS, collect_services
 from fastvps_doctor.checks.storage import collect_storage
 from fastvps_doctor.checks.system import collect_system
 from fastvps_doctor.checks.web import collect_web
 from fastvps_doctor.config import load_thresholds
-from fastvps_doctor.models import DiagnosticCheck, DiagnosticReport
+from fastvps_doctor.incident_analysis import analyze_incident, parse_time_window
+from fastvps_doctor.models import (
+    CheckStatus,
+    DiagnosticCheck,
+    DiagnosticReport,
+    IncidentInformation,
+    ProblemCategory,
+)
 from fastvps_doctor.reports import build_report, render_markdown, write_exclusive
 from fastvps_doctor.rules import rule_catalog
-from fastvps_doctor.runner import safe_hostname
+from fastvps_doctor.runner import safe_hostname, safe_systemd_unit
 
 app = typer.Typer(
     name="fastvps-doctor",
@@ -66,16 +74,85 @@ def _all_checks(
     resolve: str | None = None,
     connect: tuple[str, int] | None = None,
     required_port: int | None = None,
+    custom_units: tuple[str, ...] = (),
 ) -> list[DiagnosticCheck]:
     checks: list[DiagnosticCheck] = []
     checks.extend(collect_system())
     checks.extend(collect_storage())
     checks.extend(collect_network(resolve=resolve, connect=connect))
     checks.append(collect_listeners())
-    checks.extend(collect_services())
+    checks.extend(collect_services(custom_units=custom_units))
     checks.extend(collect_security(include_update_simulation=full))
     checks.extend(collect_web(required_port=required_port))
     return checks
+
+
+def _incident_information(
+    start: str | None,
+    affected_service: str | None,
+    category: str | None,
+    description: str | None,
+) -> IncidentInformation | None:
+    if start is None and affected_service is None and category is None and description is None:
+        return None
+    start_time = None
+    if start:
+        try:
+            start_time = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                "Incident start must be an ISO 8601 timestamp with a timezone."
+            ) from exc
+        if start_time.tzinfo is None or start_time.utcoffset() is None:
+            raise ValueError(
+                "Incident start must include a timezone, for example 2026-10-11T12:00:00Z."
+            )
+    try:
+        problem_category = ProblemCategory(category.lower()) if category else None
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in ProblemCategory)
+        raise ValueError(f"Problem category must be one of: {allowed}.") from exc
+    return IncidentInformation(
+        start_time_utc=start_time,
+        affected_service=affected_service,
+        problem_category=problem_category,
+        description=description,
+    )
+
+
+def _report_content(report: DiagnosticReport, output_format: str) -> str:
+    normalized_format = output_format.lower()
+    if normalized_format not in {"json", "markdown", "md"}:
+        raise typer.BadParameter("Choose json or markdown.")
+    return report.json_document() + "\n" if normalized_format == "json" else render_markdown(report)
+
+
+def _emit_report(report: DiagnosticReport, output_format: str, output: Path | None) -> None:
+    content = _report_content(report, output_format)
+    if output:
+        try:
+            write_exclusive(output, content)
+        except FileExistsError:
+            raise typer.BadParameter(
+                "The output file already exists; choose a new path to avoid overwriting it."
+            ) from None
+        except OSError as exc:
+            raise typer.BadParameter(f"Could not create report ({type(exc).__name__}).") from None
+        typer.echo(f"Created local report: {output}")
+    else:
+        typer.echo(content)
+
+
+def _strict_exit_if_requested(report: DiagnosticReport, enabled: bool) -> None:
+    if not enabled:
+        return
+    if report.findings or any(check.status == CheckStatus.FAIL for check in report.checks):
+        raise typer.Exit(code=1)
+    if any(
+        check.status in {CheckStatus.UNKNOWN, CheckStatus.SKIPPED, CheckStatus.WARNING}
+        for check in report.checks
+    ):
+        raise typer.Exit(code=3)
 
 
 def _render_checks(ctx: typer.Context, checks: list[DiagnosticCheck], json_output: bool) -> None:
@@ -183,6 +260,13 @@ def diagnose(
     json_output: Annotated[
         bool, typer.Option("--json", help="Print a structured support report as JSON.")
     ] = False,
+    strict_exit_codes: Annotated[
+        bool,
+        typer.Option(
+            "--strict-exit-codes",
+            help="Return 1 for findings or 3 for incomplete/uncertain checks.",
+        ),
+    ] = False,
 ) -> None:
     """Run available local checks and explain evidence-backed findings."""
     profile = _validate_profile(profile)
@@ -190,9 +274,11 @@ def diagnose(
     report = build_report(checks, load_thresholds(), profile, ticket_reference)
     if json_output:
         typer.echo(report.json_document())
+        _strict_exit_if_requested(report, strict_exit_codes)
         return
     _render_checks(ctx, report.checks, False)
     _print_report_findings(ctx, report)
+    _strict_exit_if_requested(report, strict_exit_codes)
 
 
 @app.command()
@@ -232,6 +318,13 @@ def network(
             help="Show local IPv4/IPv6 addresses in human output only; JSON reports omit them.",
         ),
     ] = False,
+    listen_port: Annotated[
+        list[int] | None,
+        typer.Option(
+            "--listen-port",
+            help="Inspect an additional local TCP/UDP listener port; repeat for several ports.",
+        ),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Inspect local interfaces, route and resolver; optional tests require a named destination."""
@@ -239,20 +332,25 @@ def network(
         raise typer.BadParameter("--connect-port requires --connect-host.")
     if connect_host is not None and connect_port is None:
         raise typer.BadParameter("--connect-host requires --connect-port.")
-    destination = None
-    if connect_host is not None and connect_port is not None:
-        destination = (safe_hostname(connect_host), connect_port)
-    checks = collect_network(
-        resolve=safe_hostname(resolve) if resolve else None,
-        connect=destination,
-        include_addresses=show_addresses,
-    )
+    if listen_port and any(port < 1 or port > 65535 for port in listen_port):
+        raise typer.BadParameter("Each --listen-port must be between 1 and 65535.")
+    try:
+        destination = None
+        if connect_host is not None and connect_port is not None:
+            destination = (safe_hostname(connect_host), connect_port)
+        checks = collect_network(
+            resolve=safe_hostname(resolve) if resolve else None,
+            connect=destination,
+            include_addresses=show_addresses,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
     local_addresses = [
         str(value)
         for key, value in checks[0].metrics.items()
         if key.startswith("address_") and isinstance(value, str)
     ]
-    checks.append(collect_listeners())
+    checks.append(collect_listeners(set(listen_port) if listen_port else None))
     _render_area(ctx, checks, json_output)
     if show_addresses and not json_output:
         _console(ctx).print("Local addresses (not included in support reports):")
@@ -262,10 +360,29 @@ def network(
 
 @app.command()
 def services(
-    ctx: typer.Context, json_output: Annotated[bool, typer.Option("--json")] = False
+    ctx: typer.Context,
+    unit: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--unit",
+            help="Also inspect one explicitly selected custom systemd unit; repeat up to five times.",
+        ),
+    ] = None,
+    validate_config: Annotated[
+        bool,
+        typer.Option(
+            "--validate-config",
+            help="Run bounded daemon config validators (may require permission to read service files).",
+        ),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Inspect installed common services and safe validators where available."""
-    _render_area(ctx, collect_services(), json_output)
+    """Inspect systemd state for common services and selected custom units."""
+    try:
+        checks = collect_services(custom_units=unit or (), validate_config=validate_config)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    _render_area(ctx, checks, json_output)
 
 
 @app.command()
@@ -275,10 +392,52 @@ def security(
         bool,
         typer.Option("--full", help="Simulate package upgrades using cached local APT metadata."),
     ] = False,
+    ssh_user: Annotated[
+        str | None, typer.Option("--ssh-user", help="Account for an optional sshd Match context.")
+    ] = None,
+    ssh_host: Annotated[
+        str | None,
+        typer.Option("--ssh-host", help="Remote host for an optional sshd Match context."),
+    ] = None,
+    ssh_address: Annotated[
+        str | None,
+        typer.Option("--ssh-address", help="Remote client IP for an sshd Match context."),
+    ] = None,
+    local_address: Annotated[
+        str | None,
+        typer.Option("--local-address", help="Server-side IP for an sshd Match context."),
+    ] = None,
+    local_port: Annotated[
+        int | None,
+        typer.Option(
+            "--local-port", min=1, max=65535, help="Server-side port for an sshd Match context."
+        ),
+    ] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Review a limited set of read-only SSH and UFW indicators."""
-    _render_area(ctx, collect_security(include_update_simulation=full), json_output)
+    """Review effective SSH settings and limited UFW indicators."""
+    context_values = (ssh_user, ssh_host, ssh_address, local_address, local_port)
+    if any(value is not None for value in context_values) and any(
+        value is None for value in context_values
+    ):
+        raise typer.BadParameter(
+            "Supply all SSH Match context fields together: --ssh-user, --ssh-host, "
+            "--ssh-address, --local-address and --local-port."
+        )
+    ssh_context = (
+        (ssh_user, ssh_host, ssh_address, local_address, local_port)
+        if ssh_user is not None
+        and ssh_host is not None
+        and ssh_address is not None
+        and local_address is not None
+        and local_port is not None
+        else None
+    )
+    try:
+        checks = collect_security(include_update_simulation=full, ssh_context=ssh_context)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    _render_area(ctx, checks, json_output)
 
 
 @app.command()
@@ -294,6 +453,89 @@ def web(
 ) -> None:
     """Check loopback HTTP/HTTPS reachability and local web listener counts."""
     _render_area(ctx, collect_web(required_port=port), json_output)
+
+
+@app.command()
+def incident(
+    ctx: typer.Context,
+    service: Annotated[
+        str,
+        typer.Option("--service", help="One systemd service unit to inspect, such as nginx."),
+    ],
+    since: Annotated[
+        str,
+        typer.Option(
+            "--since", help="Bounded event window: for example 30m, 2h or 1d (maximum 24h)."
+        ),
+    ] = "2h",
+    format: Annotated[
+        str, typer.Option("--format", help="Report format: markdown or json.")
+    ] = "markdown",
+    output: Annotated[
+        Path | None, typer.Option("--output", help="Create a new private local report file.")
+    ] = None,
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="Add support-oriented context (fastvps).")
+    ] = None,
+    ticket_reference: Annotated[
+        str | None, typer.Option("--ticket-reference", help="Optional support ticket ID.")
+    ] = None,
+    incident_start: Annotated[
+        str | None,
+        typer.Option(
+            "--incident-start", help="Customer-reported ISO 8601 start time with timezone."
+        ),
+    ] = None,
+    problem_category: Annotated[
+        str | None,
+        typer.Option(
+            "--problem-category",
+            help="website, application, database, email, network, performance, availability or other.",
+        ),
+    ] = None,
+    description: Annotated[
+        str | None,
+        typer.Option("--description", help="Brief customer-entered problem description."),
+    ] = None,
+    strict_exit_codes: Annotated[
+        bool,
+        typer.Option(
+            "--strict-exit-codes",
+            help="Return 1 for findings or 3 for incomplete/uncertain checks.",
+        ),
+    ] = False,
+) -> None:
+    """Build a bounded, timestamped incident timeline for one selected service."""
+    profile = _validate_profile(profile)
+    try:
+        parse_time_window(since)
+        selected_unit = safe_systemd_unit(service)
+        common_units = {
+            safe_systemd_unit(candidate)
+            for candidates, _executables in SERVICE_DEFINITIONS.values()
+            for candidate in candidates
+        }
+        custom_units = () if selected_unit in common_units else (service,)
+        analysis = analyze_incident(service, since)
+        information = _incident_information(
+            incident_start,
+            service,
+            problem_category,
+            description,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    checks = _all_checks(custom_units=custom_units)
+    report_data = build_report(
+        checks,
+        load_thresholds(),
+        profile,
+        ticket_reference,
+        incident_information=information,
+        incident_analysis=analysis,
+    )
+    _emit_report(report_data, format, output)
+    _strict_exit_if_requested(report_data, strict_exit_codes)
 
 
 @app.command()
@@ -329,30 +571,79 @@ def report(
     full: Annotated[
         bool, typer.Option("--full", help="Include a local cached APT upgrade simulation.")
     ] = False,
+    incident_service: Annotated[
+        str | None,
+        typer.Option(
+            "--incident-service",
+            help="Include a bounded timeline for one selected systemd service.",
+        ),
+    ] = None,
+    since: Annotated[
+        str, typer.Option("--since", help="Incident timeline window, such as 2h (maximum 24h).")
+    ] = "2h",
+    incident_start: Annotated[
+        str | None,
+        typer.Option(
+            "--incident-start", help="Customer-reported ISO 8601 start time with timezone."
+        ),
+    ] = None,
+    affected_service: Annotated[
+        str | None, typer.Option("--affected-service", help="Optional affected service label.")
+    ] = None,
+    problem_category: Annotated[
+        str | None,
+        typer.Option(
+            "--problem-category",
+            help="website, application, database, email, network, performance, availability or other.",
+        ),
+    ] = None,
+    problem_description: Annotated[
+        str | None,
+        typer.Option("--problem-description", help="Brief customer-entered problem description."),
+    ] = None,
+    strict_exit_codes: Annotated[
+        bool,
+        typer.Option(
+            "--strict-exit-codes",
+            help="Return 1 for findings or 3 for incomplete/uncertain checks.",
+        ),
+    ] = False,
 ) -> None:
     """Generate a local support report for review before sharing."""
     profile = _validate_profile(profile)
-    normalized_format = format.lower()
-    if normalized_format not in {"json", "markdown", "md"}:
-        raise typer.BadParameter("Choose json or markdown.")
-    report_data = build_report(_all_checks(full=full), load_thresholds(), profile, ticket_reference)
-    content = (
-        report_data.json_document() + "\n"
-        if normalized_format == "json"
-        else render_markdown(report_data)
+    try:
+        if incident_service:
+            parse_time_window(since)
+        elif since != "2h":
+            raise ValueError("--since requires --incident-service.")
+        information = _incident_information(
+            incident_start,
+            affected_service or incident_service,
+            problem_category,
+            problem_description,
+        )
+        analysis = analyze_incident(incident_service, since) if incident_service else None
+        selected_unit = safe_systemd_unit(incident_service) if incident_service else None
+        common_units = {
+            safe_systemd_unit(candidate)
+            for candidates, _executables in SERVICE_DEFINITIONS.values()
+            for candidate in candidates
+        }
+        custom_units = (
+            (incident_service,) if incident_service and selected_unit not in common_units else ()
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    report_data = build_report(
+        _all_checks(full=full, custom_units=custom_units),
+        load_thresholds(),
+        profile,
+        ticket_reference,
+        incident_information=information,
+        incident_analysis=analysis,
     )
-    if output:
-        try:
-            write_exclusive(output, content)
-        except FileExistsError:
-            raise typer.BadParameter(
-                "The output file already exists; choose a new path to avoid overwriting it."
-            ) from None
-        except OSError as exc:
-            raise typer.BadParameter(f"Could not create report ({type(exc).__name__}).") from None
-        typer.echo(f"Created local report: {output}")
-    else:
-        typer.echo(content)
+    _emit_report(report_data, format, output)
+    _strict_exit_if_requested(report_data, strict_exit_codes)
 
 
 @app.command()

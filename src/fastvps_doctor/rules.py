@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from fastvps_doctor.config import Thresholds
 from fastvps_doctor.models import (
     DiagnosticCheck,
@@ -124,29 +126,145 @@ def analyze(checks: list[DiagnosticCheck], thresholds: Thresholds | None = None)
                 )
             )
 
+    mounted = by_id.get("storage.mounts")
+    if mounted:
+        mount_indices = sorted(
+            {
+                int(match.group(1))
+                for key in mounted.metrics
+                if (match := re.fullmatch(r"mount_(\d+)_state", key))
+            }
+        )
+        finding_number = 5
+        for index in mount_indices:
+            prefix = f"mount_{index}_"
+            state = mounted.metrics.get(f"{prefix}state")
+            if state not in {"ok", "partial"}:
+                continue
+            fs_type = mounted.metrics.get(f"{prefix}filesystem_type")
+            fs_label = fs_type if isinstance(fs_type, str) else "unknown type"
+            usage = mounted.metrics.get(f"{prefix}usage_percent")
+            if isinstance(usage, (int, float)) and usage >= settings.disk_warning_percent:
+                critical = usage >= settings.disk_critical_percent
+                findings.append(
+                    Finding(
+                        finding_id=f"STOR-{finding_number:03d}",
+                        category="storage",
+                        severity=Severity.CRITICAL if critical else Severity.MEDIUM,
+                        title=(
+                            "A mounted filesystem is critically low on available capacity"
+                            if critical
+                            else "A mounted filesystem has elevated capacity use"
+                        ),
+                        description="A local mounted filesystem exceeded its configured capacity threshold; its mount path is omitted from the report.",
+                        evidence=[
+                            f"Local mount entry {index + 1} ({fs_label}) reports {usage:.1f}% use."
+                        ],
+                        possible_causes=[
+                            "Application data, logs, caches or backups grew",
+                            "The mounted volume is undersized for current workload",
+                        ],
+                        next_steps=[
+                            "Use `df -hT` locally to identify the mount entry and compare its growth over time.",
+                            "Inspect the owning application before changing or deleting data.",
+                        ],
+                        confidence="high",
+                        support_scope=SupportScope.GUEST,
+                    )
+                )
+                finding_number += 1
+            inodes = mounted.metrics.get(f"{prefix}inode_usage_percent")
+            if isinstance(inodes, (int, float)) and inodes >= settings.inode_warning_percent:
+                critical = inodes >= settings.inode_critical_percent
+                findings.append(
+                    Finding(
+                        finding_id=f"STOR-{finding_number:03d}",
+                        category="storage",
+                        severity=Severity.HIGH if critical else Severity.MEDIUM,
+                        title="A mounted filesystem has high inode usage",
+                        description="The mounted filesystem may run out of file entries even if bytes remain available; its mount path is omitted from the report.",
+                        evidence=[
+                            f"Local mount entry {index + 1} ({fs_label}) reports {inodes:.1f}% inode use."
+                        ],
+                        possible_causes=[
+                            "A very large number of small files",
+                            "Application sessions, caches or mail spools",
+                        ],
+                        next_steps=[
+                            "Use `df -i` locally to identify the mount entry and investigate its owning application."
+                        ],
+                        confidence="high",
+                        support_scope=SupportScope.GUEST,
+                    )
+                )
+                finding_number += 1
+            if mounted.metrics.get(f"{prefix}readonly") is True:
+                findings.append(
+                    Finding(
+                        finding_id=f"STOR-{finding_number:03d}",
+                        category="storage",
+                        severity=Severity.HIGH,
+                        title="A mounted filesystem is read-only",
+                        description="The operating system reports that a local mounted filesystem has the read-only flag.",
+                        evidence=[f"Local mount entry {index + 1} ({fs_label}) is read-only."],
+                        possible_causes=[
+                            "Filesystem error recovery",
+                            "An intentional maintenance mount",
+                            "An underlying storage issue",
+                        ],
+                        next_steps=[
+                            "Review kernel and filesystem events through the normal administrative process; do not remount or repair automatically."
+                        ],
+                        confidence="high",
+                        requires_privileges=True,
+                        support_scope=SupportScope.UNKNOWN,
+                    )
+                )
+                finding_number += 1
+            # Unsupported and incomplete mounts remain visible as unknown coverage,
+            # but never produce guessed capacity findings.
+
     system = by_id.get("system.resources")
     if system:
         memory_percent = system.metrics.get("memory_percent")
         psi = system.metrics.get("memory_psi_some_avg10")
         available_mb = system.metrics.get("memory_available_mb")
+        swap_percent = system.metrics.get("swap_percent")
         if (
             isinstance(memory_percent, (int, float))
             and memory_percent >= 100 - settings.low_available_memory_percent
         ):
-            pressure_confirmed = (
+            psi_pressure_confirmed = (
                 isinstance(psi, (int, float)) and psi >= settings.memory_psi_warning_percent
             )
+            swap_pressure_suspected = (
+                isinstance(swap_percent, (int, float))
+                and swap_percent >= settings.swap_warning_percent
+            )
+            pressure_observed = psi_pressure_confirmed or swap_pressure_suspected
             findings.append(
                 Finding(
                     finding_id="SYS-001",
                     category="system",
-                    severity=Severity.HIGH if pressure_confirmed else Severity.LOW,
-                    title="Memory pressure indicators observed"
-                    if pressure_confirmed
-                    else "Available memory is low; pressure is unconfirmed",
+                    severity=(
+                        Severity.HIGH
+                        if psi_pressure_confirmed
+                        else Severity.MEDIUM
+                        if swap_pressure_suspected
+                        else Severity.LOW
+                    ),
+                    title=(
+                        "Memory pressure indicators observed"
+                        if psi_pressure_confirmed
+                        else "Elevated swap use accompanies low available memory"
+                        if swap_pressure_suspected
+                        else "Available memory is low; pressure is unconfirmed"
+                    ),
                     description=(
                         "Low available memory is accompanied by Linux memory pressure evidence."
-                        if pressure_confirmed
+                        if psi_pressure_confirmed
+                        else "Low available memory and high swap use were observed together; swap use alone does not establish active workload pressure."
+                        if swap_pressure_suspected
                         else "Memory use is high, but this sample alone does not prove that workloads are blocked or unhealthy."
                     ),
                     evidence=[
@@ -157,7 +275,12 @@ def analyze(checks: list[DiagnosticCheck], thresholds: Thresholds | None = None)
                         f"Linux memory PSI some avg10 is {psi:.1f}%"
                         if isinstance(psi, (int, float))
                         else "Linux memory PSI was unavailable; pressure could not be confirmed.",
-                    ],
+                    ]
+                    + (
+                        [f"Swap utilization is {swap_percent:.1f}%."]
+                        if isinstance(swap_percent, (int, float))
+                        else []
+                    ),
                     possible_causes=[
                         "Workload demand exceeds available memory",
                         "A workload has a temporary or sustained memory spike",
@@ -167,7 +290,11 @@ def analyze(checks: list[DiagnosticCheck], thresholds: Thresholds | None = None)
                         "Compare `free -h` with application behavior and recent time-series data.",
                         "Inspect service memory use before restarting or changing limits.",
                     ],
-                    confidence="medium" if pressure_confirmed else "low",
+                    confidence="high"
+                    if psi_pressure_confirmed
+                    else "medium"
+                    if pressure_observed
+                    else "low",
                     support_scope=SupportScope.GUEST,
                 )
             )
@@ -242,17 +369,49 @@ def analyze(checks: list[DiagnosticCheck], thresholds: Thresholds | None = None)
                     )
                 )
 
+        for key, state in services.metrics.items():
+            match = re.fullmatch(r"custom_unit_(\d+)_state", key)
+            if match and state == "failed":
+                index = int(match.group(1))
+                unit_name = services.metrics.get(f"custom_unit_{index}_name")
+                label = unit_name if isinstance(unit_name, str) else "selected custom unit"
+                findings.append(
+                    Finding(
+                        finding_id=f"SVC-CUST-{index + 1:03d}",
+                        category="services",
+                        severity=Severity.HIGH,
+                        title="A selected custom systemd unit is in a failed state",
+                        description="The local service manager reports a failed state for a unit explicitly selected by the user.",
+                        evidence=[f"The selected systemd unit {label} is reported as failed."],
+                        possible_causes=[
+                            "A configuration error or missing dependency",
+                            "A recent change or resource issue",
+                        ],
+                        next_steps=[
+                            "Review the unit status and recent journal locally before sharing any log text."
+                        ],
+                        confidence="high",
+                        requires_privileges=True,
+                        support_scope=SupportScope.GUEST,
+                    )
+                )
+
     network = by_id.get("network.local")
     if network:
-        if network.metrics.get("default_route_present") is False:
+        if (
+            network.metrics.get("default_route_present") is False
+            and network.metrics.get("ipv6_default_route_present") is False
+        ):
             findings.append(
                 Finding(
                     finding_id="NET-001",
                     category="network",
                     severity=Severity.MEDIUM,
-                    title="No IPv4 default route was observed",
-                    description="The local route table did not show an IPv4 default route; IPv6 routes and custom network setups are not covered by this check.",
-                    evidence=["No default route was present in the local IPv4 route table."],
+                    title="No IPv4 or IPv6 default route was observed",
+                    description="Neither local route table showed an active default route; policy routing and custom network namespaces are not covered by this check.",
+                    evidence=[
+                        "No active default route was present in the local IPv4 or IPv6 route table."
+                    ],
                     possible_causes=[
                         "Guest network configuration issue",
                         "A network namespace or policy-routing setup",
@@ -454,8 +613,10 @@ def analyze(checks: list[DiagnosticCheck], thresholds: Thresholds | None = None)
                 category="security",
                 severity=Severity.LOW,
                 title="SSH password authentication appears enabled",
-                description="The main SSH configuration file indicates password authentication is enabled. Included files and Match-specific rules were not evaluated.",
-                evidence=["The main SSH configuration has `PasswordAuthentication yes`."],
+                description="The effective sshd configuration for the evaluated default or supplied connection context enables password authentication.",
+                evidence=[
+                    "Effective sshd output reports `PasswordAuthentication yes` for the evaluated context."
+                ],
                 possible_causes=[
                     "An intentional access policy",
                     "A default or legacy SSH configuration",
@@ -476,8 +637,10 @@ def analyze(checks: list[DiagnosticCheck], thresholds: Thresholds | None = None)
                 category="security",
                 severity=Severity.LOW,
                 title="SSH root login appears permitted",
-                description="The main SSH configuration file allows root login. Included files and Match-specific rules were not evaluated.",
-                evidence=["The main SSH configuration has `PermitRootLogin yes`."],
+                description="The effective sshd configuration for the evaluated default or supplied connection context permits root login.",
+                evidence=[
+                    "Effective sshd output reports `PermitRootLogin yes` for the evaluated context."
+                ],
                 possible_causes=[
                     "An intentional administrator access policy",
                     "A default or legacy configuration",
@@ -534,7 +697,7 @@ def rule_catalog() -> list[tuple[str, str]]:
         ),
         (
             "Local network",
-            "Separates default route and resolver configuration observations from an explicitly requested DNS or TCP test.",
+            "Inspects IPv4/IPv6 default-route observations and resolver configuration separately from explicitly requested DNS or TCP tests.",
         ),
         (
             "Port bind observation",
@@ -542,6 +705,6 @@ def rule_catalog() -> list[tuple[str, str]]:
         ),
         (
             "SSH configuration",
-            "Reviews a small allowlisted set of settings from the main SSH configuration file only.",
+            "Uses sshd -T effective values; connection-specific Match behavior is only evaluated when a complete context is supplied.",
         ),
     ]

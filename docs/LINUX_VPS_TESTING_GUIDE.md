@@ -22,7 +22,7 @@ python3 --version
 cat /etc/os-release
 ```
 
-The supported target is Ubuntu 24.04/26.04 or Debian 12/13 with Python 3.11 or newer. These are targets, not yet a statement that every release has passed on a VPS. Keep the output private; do not paste it publicly because system and account details can identify your host.
+The project has now been exercised in WSL Ubuntu 26.04 with Python 3.14.4, but not on your sponsored Ubuntu 24.04.5 VPS. Ubuntu 24.04 and Debian 12/13 CI jobs are configured but have no recorded run yet. This guide is an optional user-run smoke check for the target server, not a request for credentials or remote access. Keep OS/account details private; do not paste them publicly.
 
 If Python is older than 3.11, the virtual-environment module is unavailable, or the OS is outside the target, stop. Do not install packages or replace system Python as part of this review.
 
@@ -35,7 +35,7 @@ umask 077
 python3 -m venv "$HOME/.venvs/fastvps-doctor-review"
 . "$HOME/.venvs/fastvps-doctor-review/bin/activate"
 python -m pip install .
-fastvps-doctor --version
+fastvps-doctor version
 fastvps-doctor --help
 ```
 
@@ -57,7 +57,22 @@ fastvps-doctor security
 fastvps-doctor web
 ```
 
-These commands inspect local counters and configuration, query selected service state, and run bounded read-only validators when matching tools are found. They do not require root. A skipped or unknown check is an availability limitation; do not use elevated privileges just to make it pass. `security` is a narrow indicator check, not a security certification.
+These commands inspect local counters and configuration and query selected systemd state. They do not require root. Configuration validators do **not** run by default. A skipped or unknown check is an availability limitation; do not use elevated privileges just to make it pass. `security` uses effective SSH defaults and limited UFW status; it is not a security certification.
+
+To inspect one application port on this VPS without contacting an external system, add an explicitly selected local listener check:
+
+```bash
+fastvps-doctor network --listen-port 3000
+```
+
+If you have a specific service failure and want available journal metadata, optionally run a bounded incident report for that unit:
+
+```bash
+fastvps-doctor incident --service nginx --since 2h --format markdown \
+  --output "$HOME/fastvps-doctor-incident.md"
+```
+
+Use a service unit that actually exists on the VPS. Journal access may be denied to a normal account; that should remain an incomplete result. Raw log messages are discarded. Do not run configuration validators or `--full` as part of the first live smoke test.
 
 For this first production-host smoke test, do not use `--full`: it runs an APT simulation without package-manager locking, so a concurrent package operation could change state while it runs, and the count is not security-specific. Do not supply a network destination unless you have a specific host and port you intend to test. The optional DNS/TCP checks contact only the one destination you enter, but are unnecessary for verifying local command behavior.
 
@@ -68,13 +83,13 @@ Choose filenames that do not already exist. The report command refuses to overwr
 ```bash
 fastvps-doctor report --format markdown --profile fastvps \
   --output "$HOME/fastvps-doctor-review.md"
-fastvps-doctor report --format json \
+fastvps-doctor report --format json --profile fastvps \
   --output "$HOME/fastvps-doctor-review.json"
 stat -c '%a %n' "$HOME/fastvps-doctor-review.md" "$HOME/fastvps-doctor-review.json"
 less "$HOME/fastvps-doctor-review.md"
 ```
 
-Check that the report says **independent and unofficial**, lists the checks that actually ran, and contains no hostnames, IP addresses, usernames, filesystem paths, raw logs, credentials or unexpected private details. The tool uses metric allowlists and common-pattern text redaction, but that is not a universal secret scanner. Review the complete files before sharing them with anyone. Do not attach raw command output or config/log files.
+Check that the report says **independent and unofficial**, lists the checks that actually ran, and contains no hostnames, IP addresses, usernames, filesystem paths, raw logs, credentials or unexpected private details. The tool uses metric allowlists and common-pattern text redaction, including known token patterns and PEM private-key blocks, but this is not a universal secret scanner. Review the complete files before sharing them with anyone. Do not attach raw command output or config/log files.
 
 If `stat` does not show mode `600`, keep the report private and do not share it until you understand the file permissions on that filesystem.
 

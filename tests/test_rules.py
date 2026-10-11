@@ -60,6 +60,35 @@ def test_memory_pressure_needs_low_memory_and_pressure_evidence() -> None:
     assert pressure[0].severity == Severity.HIGH
 
 
+def test_swap_use_is_correlated_with_low_memory_but_not_treated_as_pressure_alone() -> None:
+    swap_alone = analyze([check("system.resources", {"memory_percent": 55, "swap_percent": 96})])
+    low_memory_with_swap = analyze(
+        [
+            check(
+                "system.resources",
+                {"memory_percent": 93, "swap_percent": 90, "memory_psi_some_avg10": None},
+            )
+        ]
+    )
+
+    assert swap_alone == []
+    assert low_memory_with_swap[0].severity == Severity.MEDIUM
+    assert low_memory_with_swap[0].confidence == "medium"
+    assert any("Swap utilization is 90.0%" in item for item in low_memory_with_swap[0].evidence)
+
+
+def test_ipv4_absence_is_not_a_route_finding_when_ipv6_route_exists() -> None:
+    findings = analyze(
+        [
+            check(
+                "network.local",
+                {"default_route_present": False, "ipv6_default_route_present": True},
+            )
+        ]
+    )
+    assert not any(item.finding_id == "NET-001" for item in findings)
+
+
 def test_failed_service_is_reported_but_inactive_service_is_not() -> None:
     failed = analyze([check("services.common", {"nginx_state": "failed"})])
     inactive = analyze([check("services.common", {"nginx_state": "inactive"})])

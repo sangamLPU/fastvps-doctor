@@ -14,7 +14,7 @@ FastVPS supported my VPS as a student. I wanted to respond with a practical tech
 
 FastVPS publicly describes 24/7 infrastructure monitoring and offers DNS/email, SSL/website and latency checks. The proposed tool focuses on local guest evidence: filesystem/inode pressure, Linux resource indicators, selected service-manager state, limited SSH/resolver checks and local loopback reachability. It intentionally does not recreate public DNS or SSL checkers, inspect FastVPS infrastructure, upload data, or decide whether a finding falls under a customer's support plan.
 
-Official pages reviewed on 10 October 2026: [VPS](https://fastvps.gr/en/vps/), [managed VPS](https://fastvps.gr/en/managed-vps-greece.html), [public tools](https://fastvps.gr/en/tools/), [FAQ/support process](https://fastvps.gr/en/faq/), and [platform overview](https://fastvps.gr/en/platform/).
+Official pages reviewed on 11 October 2026: [VPS](https://fastvps.gr/en/vps/), [managed VPS](https://fastvps.gr/en/managed-vps-greece.html), [public tools](https://fastvps.gr/en/tools/), [FAQ/support process](https://fastvps.gr/en/faq/), and [platform overview](https://fastvps.gr/en/platform/).
 
 ## Possible use
 
@@ -27,11 +27,11 @@ Support engineers could potentially use the consistent check IDs and summary to 
 
 ## Current technical limitations
 
-- The project is at version 0.1.0 and has not yet been integration-tested on Linux in this development environment.
-- Checks cover only a subset of Linux services and may not detect custom units, namespaces, or nonstandard installation paths.
-- Reports are point-in-time observations, not root-cause analysis or provider-side telemetry.
-- The security checklist is deliberately narrow. The tool does not collect logs, verify backups, inspect public TLS, or guarantee that a service is healthy.
-- Compatibility is a target matrix, not an assertion that every listed distribution has passed acceptance testing.
+- Version 0.2.0 is a beta candidate for engineering evaluation. The current evidence is 136 passing tests and quality checks in WSL Ubuntu 26.04 / Python 3.14.4, plus 134 Windows tests with two Linux-only skips. The configured Ubuntu 24.04, Debian 12 and Debian 13 GitHub Actions jobs have not run; the sponsored Ubuntu 24.04.5 VPS has not been accessed.
+- Checks cover a subset of Linux services and may not detect all aliases/templates, namespaces or nonstandard installation paths.
+- Incident output is timestamped event classification and cautious hypotheses, not root-cause analysis or provider-side telemetry.
+- The security checklist is deliberately narrow. It does not verify backups, inspect public TLS, or guarantee that a service is healthy.
+- WSL Ubuntu 26.04 passed the recorded test suite, but that result does not establish compatibility across Ubuntu 26.04 installations, Ubuntu 24.04.5, Debian or the sponsored VPS. Compatibility remains unverified for the configured CI images until those jobs actually pass.
 
 ## Feedback requested
 

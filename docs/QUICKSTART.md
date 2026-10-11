@@ -14,6 +14,8 @@ Review the checks and any rule-based findings. A high CPU sample or memory utili
 fastvps-doctor storage
 fastvps-doctor services
 fastvps-doctor network
+fastvps-doctor network --listen-port 3000
+fastvps-doctor services --unit my-app.service
 fastvps-doctor web --port 3000
 ```
 
@@ -26,6 +28,8 @@ fastvps-doctor report --format markdown --profile fastvps --output support-repor
 ```
 
 The output path must not already exist. Open and review the file locally before attaching it to a ticket. The FastVPS profile adds context, not an integration or responsibility decision. Management scope depends on the customer's plan and written service scope. Official support options are documented in the [FastVPS FAQ](https://fastvps.gr/en/faq/).
+
+For a bounded timeline for one systemd service, run `fastvps-doctor incident --service nginx --since 2h`. It reads available timestamped journal metadata, discards raw messages, and reports event classifications without asserting why an event happened. Denied journal access or missing timestamps make the result incomplete. `services --validate-config` is a separate opt-in for selected Nginx/Apache/SSH validators.
 
 ## 4. Ask what the rules mean
 
@@ -49,5 +53,6 @@ inode_warning_percent = 80
 inode_critical_percent = 90
 low_available_memory_percent = 10
 memory_psi_warning_percent = 10
+swap_warning_percent = 80
 ```
 

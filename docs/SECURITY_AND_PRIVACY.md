@@ -2,29 +2,31 @@
 
 ## Execution behavior
 
-- Checks read operating-system counters, a few bounded system configuration indicators and (only for a detected failed service) up to 40 recent journal lines within one hour.
-- Subprocesses go only through `runner.py`, which has a fixed executable and argument form per operation, resolves utilities only from conventional administrator-managed Linux directories (not the caller's `PATH`), uses `shell=False`, a minimal environment, short timeouts and an output cap.
-- On Linux, subprocesses start in their own process group so timeout cleanup can terminate helper processes too. If the kernel does not reap a killed process promptly, the command returns an inconclusive timeout rather than waiting forever.
-- Journal output is capped at 8 KiB and three seconds, scanned only for generic error words, and immediately discarded; only a count can enter the report. Permission failures are reported as unavailable.
-- The normal run does not recursively enumerate directories, install packages, edit files, change firewall/SSH/users, kill processes, reboot, or require root.
-- Optional DNS and TCP tests run only when the user explicitly supplies one hostname and, for TCP, one port. They do not scan a range or arbitrary URL.
-- `--full` may run a read-only APT simulation against cached metadata. It does not refresh package indexes or install/upgrade packages, but APT simulation disables package-manager locking; do not run it while another package operation is active. Non-root APT simulations can omit configuration data the user cannot read, and the result is not security-specific.
-- Debian's [APT `apt-get` reference](https://manpages.debian.org/bookworm/apt/apt-get.8) documents the disabled locking and possible state changes during simulation.
-- No report is sent anywhere. No telemetry, account integration, secret collection, AI API or third-party hosted service is used.
+- Default checks read local OS counters, selected configuration metadata, systemd state and limited firewall status. They do not require root, install packages, edit configuration, restart services, change firewall/SSH/users, kill processes or upload data.
+- Subprocess calls are centralized in `runner.py`, use a fixed executable/argument form, `shell=False`, a minimal environment, trusted executable directories, explicit timeouts and bounded output. Linux timeout cleanup targets the command's process group. Linux behavior still needs a successful Linux integration run.
+- Service journal summaries only run for a failed service and export an error-indicator count, not log lines. `incident --service UNIT` is a separate opt-in workflow: it reads bounded timestamped service and kernel journal records, classifies fixed event types and discards raw messages. Journal permission and retention limitations are reported as incomplete evidence.
+- `services --validate-config` is opt-in and invokes bounded Nginx, Apache or SSH validators. Inspect the OS-specific output privately; the report includes only a pass/fail-or-inconclusive state, not validator text.
+- DNS and TCP checks run only after the user names one host and (for TCP) one port. They do not scan a range or accept a URL. `network --listen-port` inspects local sockets only.
+- `--full` runs an APT simulation using local cached metadata. It does not refresh package indexes or install/upgrade packages, but simulation disables package-manager locking; avoid concurrent package operations. It is not a security-advisory audit.
+- There is no telemetry, FastVPS account integration, automatic ticket submission, AI API, automatic repair or external report upload.
 
 ## Report data minimization
 
-The report builder applies `privacy.py` allowlists before rendering JSON or Markdown. Reports contain product/version/time, distribution name and version, summarized metrics, check statuses, rule findings and safe next steps. Default reports exclude hostnames, IP addresses, usernames, filesystem paths, environment variables, credentials, raw command output, raw logs and configuration file contents. Common identity and credential patterns in exported text are redacted as a second layer. The `network --show-addresses` option displays local addresses only in explicitly requested human-readable output; JSON and support reports omit them. User-entered ticket references are included only when explicitly provided and are restricted to identifier characters.
+JSON and Markdown reports use an explicit check/metric allowlist before findings are generated or rendered. Raw logs and configuration contents are never included. Mount paths are omitted; address values are omitted; customer descriptions are scrubbed for common hostname, IP, username, path, credential assignment, known token and PEM private-key patterns. Ticket references are accepted only as short conventional identifiers. Findings use static templates and bounded evidence summaries.
 
-The report writer uses exclusive creation and requests owner-only `0600` permissions on POSIX systems. This is not a universal secret scanner or guarantee about every filesystem's ACL behavior; inspect reports and file permissions before sharing.
+Redaction is defense in depth, not a universal secret detector. Unlabelled or proprietary credentials may evade pattern matching. Review every report locally, including JSON metadata, before sharing. Reports are not sent anywhere by the application.
 
-The SSH review parses three directives in the main configuration file and checks whether group/other write bits are set. It emits booleans only and does not follow `Include` files or `Match` blocks. Service validators' output and raw journal text are not included. Keep the generated report local until you review it; this software cannot control subsequent sharing.
+The report writer creates a new file exclusively and requests `0600` on POSIX. Windows ACL behavior is not covered by this mode request. Check actual file permissions on the Linux filesystem before sharing.
 
 ## Evidence and certainty
 
-`no_major_findings` does not mean healthy or secure. Missing optional services are not failures. A short high CPU sample does not produce a finding. High memory use is distinct from kernel memory pressure; PSI evidence is reported where available. An inactive firewall reported by UFW does not prove no firewall exists. Provider responsibility remains undetermined unless a human checks the ordered service scope and provider-side evidence.
+- `no_major_findings` is not proof of health, security or root cause.
+- High memory or swap use alone is not classified as confirmed pressure. PSI is stronger evidence; high swap only corroborates when available memory is low.
+- Route checks cover Linux IPv4/IPv6 default routes but not policy routing or network namespaces.
+- `sshd -T` exposes effective configuration for the provided context. When connection-specific `Match` context is omitted, those values might not describe a particular login.
+- An inactive UFW status does not prove that no firewall exists. The security command is not a security audit.
+- Provider responsibility remains undetermined unless a human checks the purchased plan and provider-side evidence.
 
-## Reporting a vulnerability
+## Vulnerability reports
 
-Before adding any command or data field, review its side effects, time bound, output size, privacy implications and required privileges. Never allow log text, filenames or other external input to become instructions or shell syntax.
-
+Review every proposed command or data field for side effects, privilege, time/output bounds and privacy impact. Do not allow journal content, filenames or other external input to become executable instructions. Report project security concerns through the repository's private reporting channel if one is configured.

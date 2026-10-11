@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -31,10 +34,14 @@ jobs:
 
   linux-integration:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "debian:12", "debian:13"]
     steps:
       - uses: actions/checkout@v7
-      - name: Build disposable Ubuntu integration image
-        run: docker build -f tests/integration/Dockerfile -t fastvps-doctor-integration .
+      - name: Build disposable Linux integration image
+        run: docker build --build-arg BASE_IMAGE=${{ matrix.image }} -f tests/integration/Dockerfile -t fastvps-doctor-integration:${{ strategy.job-index }} .
       - name: Run Linux integration checks as an unprivileged user
-        run: docker run --rm fastvps-doctor-integration
+        run: docker run --rm fastvps-doctor-integration:${{ strategy.job-index }}
 
