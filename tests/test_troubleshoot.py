@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -333,7 +334,8 @@ def test_noninteractive_command_requires_scenario_and_accepts_explicit_choice(mo
     monkeypatch.setattr(cli_module, "_is_interactive", lambda: False)
     result = CliRunner().invoke(app, ["troubleshoot"])
     assert result.exit_code != 0
-    assert "--scenario is required" in result.output
+    plain_output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.output)
+    assert "--scenario is required" in plain_output
 
     observed: dict[str, object] = {}
 
