@@ -1,0 +1,83 @@
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging and build output
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# Test, type-checker and coverage output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local credentials and private configuration
+.env
+.env.*
+!.env.example
+.ssh/
+.aws/
+.config/gcloud/
+.netrc
+.npmrc
+.pypirc
+credentials.json
+credentials.toml
+secrets/
+secrets.json
+secrets.toml
+secrets.yaml
+secrets.yml
+secrets.txt
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Locally generated diagnostic reports (keep the checked-in simulated example)
+support-report*.json
+support-report*.md
+fastvps-doctor-report*.json
+fastvps-doctor-report*.md
+fastvps-doctor-review*.json
+fastvps-doctor-review*.md
+diagnostic-report*.json
+diagnostic-report*.md
+
+# Temporary files and logs
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.orig
+*.rej
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

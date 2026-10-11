@@ -1,0 +1,53 @@
+# Quick start
+
+## 1. Collect a local snapshot
+
+```bash
+fastvps-doctor diagnose
+```
+
+Review the checks and any rule-based findings. A high CPU sample or memory utilization by itself is not a confirmed incident. A skipped check means the tool could not safely or portably inspect it; it is not a pass.
+
+## 2. Focus on one area
+
+```bash
+fastvps-doctor storage
+fastvps-doctor services
+fastvps-doctor network
+fastvps-doctor web --port 3000
+```
+
+`web --port` asks the tool to inspect that one local port. It does not scan remote systems. `network --resolve example.org` and `network --connect-host example.org --connect-port 443` run one explicitly requested DNS lookup or TCP connection.
+
+## 3. Make a support report
+
+```bash
+fastvps-doctor report --format markdown --profile fastvps --output support-report.md
+```
+
+The output path must not already exist. Open and review the file locally before attaching it to a ticket. The FastVPS profile adds context, not an integration or responsibility decision. Management scope depends on the customer's plan and written service scope. Official support options are documented in the [FastVPS FAQ](https://fastvps.gr/en/faq/).
+
+## 4. Ask what the rules mean
+
+```bash
+fastvps-doctor explain
+fastvps-doctor --help
+fastvps-doctor diagnose --json
+```
+
+JSON is useful for inspection or later tooling; it still contains only allowlisted report fields. Never attach raw logs or configuration files without manually reviewing them.
+
+## Configure thresholds
+
+Create `~/.config/fastvps-doctor/config.toml` to adjust deterministic rule thresholds. The configuration is read only; invalid settings fall back to defaults.
+
+```toml
+[thresholds]
+disk_warning_percent = 80
+disk_critical_percent = 90
+inode_warning_percent = 80
+inode_critical_percent = 90
+low_available_memory_percent = 10
+memory_psi_warning_percent = 10
+```
+
