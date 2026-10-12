@@ -78,6 +78,14 @@ CHECK_FIELDS: dict[str, set[str]] = {
         "service_exec_main_code",
         "service_exec_main_status",
     },
+    "troubleshoot.web_services": {
+        "nginx_installed",
+        "nginx_unit_found",
+        "nginx_state",
+        "apache2_installed",
+        "apache2_unit_found",
+        "apache2_state",
+    },
     "troubleshoot.http": {
         "http_probe_requested",
         "http_probe_state",
@@ -192,6 +200,7 @@ CHECK_CATEGORIES = {
     "storage.mounts": "storage",
     "services.common": "services",
     "troubleshoot.service": "services",
+    "troubleshoot.web_services": "web",
     "troubleshoot.http": "web",
     "troubleshoot.config": "services",
     "security.local": "security",

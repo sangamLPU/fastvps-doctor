@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 import fastvps_doctor.cli as cli_module
@@ -21,8 +22,10 @@ from fastvps_doctor.privacy import sanitize_checks
 from fastvps_doctor.runner import CommandResult
 from fastvps_doctor.troubleshoot import (
     build_troubleshoot_report,
+    collect_common_web_services,
     collect_loopback_http_head,
     collect_selected_service,
+    discover_relevant_services,
     render_troubleshoot_markdown,
 )
 
@@ -87,6 +90,284 @@ def test_selected_service_queries_only_one_unit_and_captures_allowlisted_propert
     assert check.metrics["service_exec_main_status"] == 9
     assert "worker@green" not in check.model_dump_json()
     assert "secret-value" not in check.model_dump_json()
+
+
+def test_blank_service_choice_goes_to_unknown_without_repeating_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    monkeypatch.setattr(
+        cli_module.typer,
+        "prompt",
+        lambda label, **_kwargs: prompts.append(label) or "",
+    )
+
+    assert cli_module._prompt_unit() is None
+    assert prompts == ["Enter 1, 2 or 3"]
+
+
+def test_unknown_service_option_continues_without_a_fabricated_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: "3")
+
+    assert cli_module._prompt_unit() is None
+
+
+def test_detected_service_selection_excludes_unrelated_running_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "discover_relevant_services",
+        lambda _scenario: ([("nginx", "nginx.service", "inactive")], True),
+    )
+    answers = iter(["1", "1"])
+    monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: next(answers))
+
+    assert cli_module._prompt_unit() == "nginx.service"
+
+
+def test_no_relevant_units_offers_unknown_without_suggesting_other_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output: list[str] = []
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    monkeypatch.setattr(cli_module.typer, "echo", output.append)
+    monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: "1")
+
+    assert cli_module._prompt_unit() is None
+    assert any("No relevant application service unit" in line for line in output)
+    assert not any("ssh" in line.lower() or "docker" in line.lower() for line in output)
+
+
+def test_unavailable_systemd_is_described_as_incomplete_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output: list[str] = []
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], False))
+    monkeypatch.setattr(cli_module.typer, "echo", output.append)
+    monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: "3")
+
+    assert cli_module._prompt_unit() is None
+    assert any("unavailable or incomplete" in line for line in output)
+
+
+def test_manual_service_name_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    answers = iter(["2", "myapp.service"])
+    monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: next(answers))
+
+    assert cli_module._prompt_unit() == "myapp.service"
+
+
+@pytest.mark.parametrize("choice", ["../ssh", "-x", "bad name", "service;id"])
+def test_manual_service_name_rejects_invalid_identifier(
+    monkeypatch: pytest.MonkeyPatch, choice: str
+) -> None:
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    answers = iter(["2", choice])
+    monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: next(answers))
+
+    with pytest.raises(typer.BadParameter, match="valid systemd unit"):
+        cli_module._prompt_unit()
+
+
+def test_blank_manual_service_name_means_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    answers = iter(["2", ""])
+    monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: next(answers))
+
+    assert cli_module._prompt_unit() is None
+
+
+@pytest.mark.parametrize("exception", [KeyboardInterrupt, EOFError])
+def test_service_prompt_cancellation_is_graceful(
+    monkeypatch: pytest.MonkeyPatch, exception: type[BaseException]
+) -> None:
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+
+    def cancel(*_args, **_kwargs) -> str:
+        raise exception
+
+    monkeypatch.setattr(cli_module.typer, "prompt", cancel)
+    with pytest.raises(typer.Abort):
+        cli_module._prompt_unit()
+
+
+def test_common_web_service_inventory_distinguishes_absence_from_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(troubleshoot_module.sys, "platform", "linux")
+    monkeypatch.setattr(troubleshoot_module, "find_executable", lambda _name: None)
+
+    class UnitRunner:
+        def __init__(self, result: CommandResult) -> None:
+            self.result = result
+
+        def systemd_unit_show(self, _unit: str) -> CommandResult:
+            return self.result
+
+    absent = collect_common_web_services(
+        UnitRunner(CommandResult(available=True, returncode=0, stdout="LoadState=not-found\n"))  # type: ignore[arg-type]
+    )
+    assert absent.status == CheckStatus.PASS
+    assert absent.metrics["nginx_installed"] is False
+    assert absent.metrics["apache2_installed"] is False
+
+    unavailable = collect_common_web_services(
+        UnitRunner(CommandResult(available=False))  # type: ignore[arg-type]
+    )
+    assert unavailable.status == CheckStatus.UNKNOWN
+    assert unavailable.metrics["nginx_installed"] is None
+    assert unavailable.metrics["nginx_state"] == "unavailable"
+
+
+def test_relevant_service_discovery_handles_absence_unavailability_and_known_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(troubleshoot_module.sys, "platform", "linux")
+    monkeypatch.setattr(troubleshoot_module, "find_executable", lambda _name: False)
+    absent = CommandResult(available=True, returncode=0, stdout="LoadState=not-found\n")
+
+    class UnitRunner:
+        def __init__(self, results: dict[str, CommandResult]) -> None:
+            self.results = results
+            self.calls: list[str] = []
+
+        def systemd_unit_show(self, unit: str) -> CommandResult:
+            self.calls.append(unit)
+            return self.results.get(unit, absent)
+
+    empty_runner = UnitRunner({})
+    candidates, complete = discover_relevant_services(
+        TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        empty_runner,  # type: ignore[arg-type]
+    )
+    assert candidates == []
+    assert complete is True
+    assert not any("ssh" in unit or "docker" in unit for unit in empty_runner.calls)
+
+    unavailable_runner = UnitRunner({"nginx.service": CommandResult(available=False)})
+    candidates, complete = discover_relevant_services(
+        TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        unavailable_runner,  # type: ignore[arg-type]
+    )
+    assert candidates == []
+    assert complete is False
+    assert unavailable_runner.calls == ["nginx.service"]
+
+    active_runner = UnitRunner(
+        {
+            "nginx.service": CommandResult(
+                available=True,
+                returncode=0,
+                stdout="LoadState=loaded\nActiveState=active\n",
+            )
+        }
+    )
+    candidates, complete = discover_relevant_services(
+        TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        active_runner,  # type: ignore[arg-type]
+    )
+    assert candidates == [("nginx", "nginx.service", "active")]
+    assert complete is True
+
+
+def test_web_service_inventory_report_does_not_export_raw_unit_output(monkeypatch) -> None:
+    monkeypatch.setattr(troubleshoot_module.sys, "platform", "linux")
+    monkeypatch.setattr(troubleshoot_module, "find_executable", lambda _name: False)
+
+    class PrivateRunner:
+        def systemd_unit_show(self, _unit: str) -> CommandResult:
+            return CommandResult(
+                available=True,
+                returncode=0,
+                stdout="LoadState=loaded\nActiveState=active\nCustom=secret.example.com\n",
+            )
+
+    check = collect_common_web_services(PrivateRunner())  # type: ignore[arg-type]
+    clean = sanitize_checks([check])[0]
+    serialized = clean.model_dump_json()
+    assert "secret.example.com" not in serialized
+    assert "Custom" not in serialized
+    assert clean.metrics["nginx_state"] == "active"
+
+
+def test_unknown_website_generated_reports_keep_web_inventory_allowlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(troubleshoot_module.sys, "platform", "linux")
+    monkeypatch.setattr(troubleshoot_module, "find_executable", lambda _name: False)
+
+    class PrivateRunner:
+        def systemd_unit_show(self, _unit: str) -> CommandResult:
+            return CommandResult(
+                available=True,
+                returncode=0,
+                stdout=(
+                    "LoadState=not-found\nHost=private-vps.example.test\nPassword=hidden-value\n"
+                ),
+            )
+
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_common_web_services",
+        lambda: collect_common_web_services(PrivateRunner()),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(troubleshoot_module, "collect_storage", lambda: [_check("storage.root")])
+    monkeypatch.setattr(troubleshoot_module, "collect_system", lambda: [_check("system.resources")])
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_listeners",
+        lambda _ports: _check(
+            "network.listeners", {"port_80_listeners": 0, "port_443_listeners": 0}
+        ),
+    )
+
+    report = build_troubleshoot_report(TroubleshootScenario.WEBSITE_UNAVAILABLE)
+    json_report = report.json_document()
+    markdown_report = render_troubleshoot_markdown(report)
+
+    for private_value in ("private-vps.example.test", "hidden-value", "Password"):
+        assert private_value not in json_report
+        assert private_value not in markdown_report
+    assert "nginx_state" in json_report
+    assert "No common Nginx or Apache" in markdown_report
+
+
+def test_unknown_web_service_inventory_stays_unknown_in_report(monkeypatch) -> None:
+    monkeypatch.setattr(troubleshoot_module.sys, "platform", "linux")
+    monkeypatch.setattr(troubleshoot_module, "find_executable", lambda _name: False)
+
+    class UnavailableRunner:
+        def systemd_unit_show(self, _unit: str) -> CommandResult:
+            return CommandResult(available=False)
+
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_common_web_services",
+        lambda: collect_common_web_services(UnavailableRunner()),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(troubleshoot_module, "collect_storage", lambda: [_check("storage.root")])
+    monkeypatch.setattr(troubleshoot_module, "collect_system", lambda: [_check("system.resources")])
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_listeners",
+        lambda _ports: _check(
+            "network.listeners", {"port_80_listeners": None, "port_443_listeners": None}
+        ),
+    )
+
+    report = build_troubleshoot_report(TroubleshootScenario.WEBSITE_UNAVAILABLE)
+    web_check = next(item for item in report.checks if item.check_id == "troubleshoot.web_services")
+
+    assert web_check.status == CheckStatus.UNKNOWN
+    assert web_check.metrics["nginx_installed"] is None
+    assert any(item.certainty.value == "insufficient" for item in report.conclusions)
+    assert not any("No common Nginx or Apache" in item.statement for item in report.conclusions)
 
 
 @pytest.mark.parametrize(
@@ -401,6 +682,241 @@ def test_interactive_scenario_picker_and_cancel_do_not_write_report(monkeypatch)
     assert cancelled.exit_code != 0
     assert "Aborted" in cancelled.output
     assert "Created local report" not in cancelled.output
+
+
+def test_interactive_unknown_service_continues_without_reprompting(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], False))
+    monkeypatch.setattr(
+        cli_module,
+        "build_troubleshoot_report",
+        lambda scenario, **kwargs: captured.update(scenario=scenario, **kwargs) or object(),
+    )
+    monkeypatch.setattr(cli_module, "_emit_troubleshoot_report", lambda *_args: None)
+
+    result = CliRunner().invoke(app, ["troubleshoot"], input="2\n\n\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Which application or background service is having trouble?") == 1
+    assert captured["scenario"] == TroubleshootScenario.SERVICE_CRASH
+    assert captured["service"] is None
+    assert "cannot assess the affected application's service state" in result.output
+
+
+def test_interactive_unknown_website_needs_no_port_or_external_probe(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    monkeypatch.setattr(
+        cli_module,
+        "build_troubleshoot_report",
+        lambda scenario, **kwargs: captured.update(scenario=scenario, **kwargs) or object(),
+    )
+    monkeypatch.setattr(cli_module, "_emit_troubleshoot_report", lambda *_args: None)
+
+    result = CliRunner().invoke(app, ["troubleshoot"], input="1\n3\n\nn\n")
+
+    assert result.exit_code == 0, result.output
+    assert "local application port" not in result.output
+    assert "HEAD request" not in result.output
+    assert captured["scenario"] == TroubleshootScenario.WEBSITE_UNAVAILABLE
+    assert captured["service"] is None
+    assert captured["port"] is None
+    assert captured["probe_http"] is False
+
+
+def test_ctrl_c_at_service_prompt_aborts_without_traceback(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(cli_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], False))
+    prompt_count = 0
+
+    def cancel_on_unit_prompt(*_args, **_kwargs) -> str:
+        nonlocal prompt_count
+        prompt_count += 1
+        if prompt_count == 1:
+            return "2"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_module.typer, "prompt", cancel_on_unit_prompt)
+
+    destination = tmp_path / "cancelled-report.md"
+    result = CliRunner().invoke(app, ["troubleshoot", "--output", str(destination)])
+
+    assert result.exit_code != 0
+    assert "Aborted" in result.output
+    assert "Traceback" not in result.output
+    assert "Created local report" not in result.output
+    assert not destination.exists()
+
+
+def test_eof_at_service_prompt_aborts_without_report_or_traceback(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(cli_module, "_is_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "discover_relevant_services", lambda _scenario: ([], True))
+    monkeypatch.setattr(
+        cli_module,
+        "build_troubleshoot_report",
+        lambda *_args, **_kwargs: pytest.fail("report must not be built after EOF"),
+    )
+    destination = tmp_path / "eof-report.md"
+
+    result = CliRunner().invoke(
+        app,
+        ["troubleshoot", "--output", str(destination)],
+        input="1\n",
+    )
+
+    assert result.exit_code != 0
+    assert "Aborted" in result.output
+    assert "Traceback" not in result.output
+    assert "Created local report" not in result.output
+    assert not destination.exists()
+
+
+def test_noninteractive_service_specific_scenario_still_requires_service(monkeypatch) -> None:
+    monkeypatch.setattr(cli_module, "_is_interactive", lambda: False)
+
+    result = CliRunner().invoke(
+        app, ["troubleshoot", "--scenario", "service-crash", "--format", "json"]
+    )
+
+    assert result.exit_code != 0
+    assert "--service is required" in result.output
+
+
+def test_noninteractive_website_accepts_explicit_service_and_port(monkeypatch) -> None:
+    from examples.troubleshoot_demos import build_fixture_report
+
+    monkeypatch.setattr(cli_module, "_is_interactive", lambda: False)
+    captured: dict[str, object] = {}
+
+    def build(scenario, **kwargs):
+        captured["scenario"] = scenario
+        captured.update(kwargs)
+        return build_fixture_report(TroubleshootScenario.WEBSITE_UNAVAILABLE)
+
+    monkeypatch.setattr(cli_module, "build_troubleshoot_report", build)
+    result = CliRunner().invoke(
+        app,
+        [
+            "troubleshoot",
+            "--scenario",
+            "website-unavailable",
+            "--service",
+            "myapp.service",
+            "--port",
+            "8080",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["scenario"] == TroubleshootScenario.WEBSITE_UNAVAILABLE
+    assert captured["service"] == "myapp.service"
+    assert captured["port"] == 8080
+
+
+def test_website_unknown_service_collects_only_general_read_only_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _check("storage.root", {"usage_percent": 70.0})
+    resources = _check("system.resources", {"memory_percent": 20.0})
+    web_services = _check(
+        "troubleshoot.web_services",
+        {
+            "nginx_installed": False,
+            "nginx_unit_found": False,
+            "nginx_state": "not_installed",
+            "apache2_installed": False,
+            "apache2_unit_found": False,
+            "apache2_state": "not_installed",
+        },
+    )
+    listeners = _check("network.listeners", {"port_80_listeners": 0, "port_443_listeners": 0})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_common_web_services",
+        lambda: calls.append("web_services") or web_services,
+    )
+    monkeypatch.setattr(
+        troubleshoot_module, "collect_storage", lambda: calls.append("storage") or [storage]
+    )
+    monkeypatch.setattr(
+        troubleshoot_module, "collect_system", lambda: calls.append("system") or [resources]
+    )
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_listeners",
+        lambda ports: calls.append(f"listeners:{sorted(ports)}") or listeners,
+    )
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_selected_service",
+        lambda _unit: pytest.fail("unknown service must not be queried"),
+    )
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "analyze_incident",
+        lambda *_args: pytest.fail("unknown service must not trigger service journals"),
+    )
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_selected_config_validation",
+        lambda _unit: pytest.fail("unknown service must not trigger config validation"),
+    )
+
+    report = build_troubleshoot_report(TroubleshootScenario.WEBSITE_UNAVAILABLE, service=None)
+
+    assert calls == ["web_services", "storage", "system", "listeners:[80, 443]"]
+    assert {check.check_id for check in report.checks} == {
+        "troubleshoot.web_services",
+        "storage.root",
+        "system.resources",
+        "network.listeners",
+    }
+    assert report.service_label is None
+    assert report.timeline == []
+    assert any("does not confirm a website outage" in item.statement for item in report.conclusions)
+    assert any("No common Nginx or Apache" in item.statement for item in report.conclusions)
+    assert all(item.certainty.value != "plausible" for item in report.conclusions)
+    assert any("No systemd unit was selected" in gap for gap in report.evidence_gaps)
+
+
+def test_service_crash_unknown_service_collects_general_evidence_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _check("storage.root", {"usage_percent": 65.0})
+    resources = _check("system.resources", {"memory_percent": 30.0})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        troubleshoot_module, "collect_storage", lambda: calls.append("storage") or [storage]
+    )
+    monkeypatch.setattr(
+        troubleshoot_module, "collect_system", lambda: calls.append("system") or [resources]
+    )
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "collect_selected_service",
+        lambda _unit: pytest.fail("unknown service must not be queried"),
+    )
+    monkeypatch.setattr(
+        troubleshoot_module,
+        "analyze_incident",
+        lambda *_args: pytest.fail("unknown service must not trigger service journals"),
+    )
+
+    report = build_troubleshoot_report(TroubleshootScenario.SERVICE_CRASH)
+
+    assert calls == ["system", "storage"]
+    assert {check.check_id for check in report.checks} == {"system.resources", "storage.root"}
+    assert report.timeline == []
+    assert any(
+        "cannot confirm whether a particular service" in item.statement
+        for item in report.conclusions
+    )
+    assert any("No systemd unit was selected" in gap for gap in report.evidence_gaps)
 
 
 def test_json_and_markdown_reports_are_built_from_same_sanitized_scenario_model(

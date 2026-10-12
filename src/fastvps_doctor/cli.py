@@ -34,7 +34,11 @@ from fastvps_doctor.models import (
 from fastvps_doctor.reports import build_report, render_markdown, write_exclusive
 from fastvps_doctor.rules import rule_catalog
 from fastvps_doctor.runner import safe_hostname, safe_systemd_unit
-from fastvps_doctor.troubleshoot import build_troubleshoot_report, render_troubleshoot_markdown
+from fastvps_doctor.troubleshoot import (
+    build_troubleshoot_report,
+    discover_relevant_services,
+    render_troubleshoot_markdown,
+)
 
 app = typer.Typer(
     name="fastvps-doctor",
@@ -210,13 +214,96 @@ def _prompt_scenario() -> TroubleshootScenario:
     return scenarios[choice]
 
 
-def _prompt_unit(label: str = "Systemd service unit") -> str:
-    value = str(typer.prompt(label)).strip()
+def _prompt_unit(
+    scenario: TroubleshootScenario = TroubleshootScenario.WEBSITE_UNAVAILABLE,
+) -> str | None:
+    """Ask whether the user can identify the affected application service."""
+    labels = {
+        "nginx": "Nginx",
+        "apache2": "Apache",
+        "mysql": "MySQL",
+        "mariadb": "MariaDB",
+        "postgresql": "PostgreSQL",
+        "redis-server": "Redis",
+    }
+    typer.echo(
+        "Which application or background service is having trouble? "
+        "For example, nginx, apache2, or myapp.service."
+    )
+    typer.echo(
+        "A service is a background program. Its service name lets FastVPS Doctor check "
+        "that program's state and recent events."
+    )
+    detected, complete = discover_relevant_services(scenario)
+    if detected:
+        typer.echo("Detected application service units (choose one only if it is affected):")
+        for index, (name, _unit, state) in enumerate(detected, start=1):
+            typer.echo(f"  {index}. {labels[name]} ({state})")
+    elif complete:
+        typer.echo(
+            "No relevant application service unit was detected. This does not show that the application is down."
+        )
+    else:
+        typer.echo(
+            "Relevant service discovery was unavailable or incomplete; you can enter a known name or continue without one."
+        )
+    typer.echo("Choose one of these options:")
+    typer.echo(
+        "  1. Select a detected relevant service"
+        if detected
+        else "  1. Select a detected relevant service (none detected)"
+    )
+    typer.echo("  2. Enter a service name manually")
+    typer.echo("  3. I'm not sure")
     try:
-        safe_systemd_unit(value)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from None
-    return value
+        choice = str(typer.prompt("Enter 1, 2 or 3", default="3")).strip()
+        if choice == "1" and detected:
+            typer.echo("Choose only the service that belongs to the affected application.")
+            for index, (name, _unit, state) in enumerate(detected, start=1):
+                typer.echo(f"  {index}. {labels[name]} ({state})")
+            service_choice = str(
+                typer.prompt("Enter a listed number, or press Enter for I'm not sure", default="")
+            ).strip()
+            if not service_choice:
+                typer.echo(
+                    "No service selected. The diagnosis will continue with checks that do not need a service name."
+                )
+                return None
+            if not service_choice.isdecimal() or not 1 <= int(service_choice) <= len(detected):
+                raise typer.BadParameter(
+                    "Choose one of the listed service numbers, or press Enter."
+                )
+            return detected[int(service_choice) - 1][1]
+        if choice == "2":
+            service = str(
+                typer.prompt(
+                    "Which application or background service is having trouble? "
+                    "For example, nginx, apache2, or myapp.service",
+                    default="",
+                    show_default=False,
+                )
+            ).strip()
+            if not service:
+                typer.echo("No service selected; continuing with checks that do not need its name.")
+                return None
+            try:
+                safe_systemd_unit(service)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from None
+            return service
+    except (KeyboardInterrupt, EOFError):
+        raise typer.Abort() from None
+    if choice in {"", "3"}:
+        typer.echo(
+            "No service selected. FastVPS Doctor will run only checks that do not need a "
+            "service name; it cannot assess the affected application's service state, "
+            "logs or configuration."
+        )
+        return None
+    if choice == "1" and not detected:
+        typer.echo("There is no detected service to select; continuing without a service name.")
+        return None
+    raise typer.BadParameter("Choose 1, 2 or 3.")
 
 
 def _is_interactive() -> bool:
@@ -592,6 +679,8 @@ def troubleshoot(
     """Guide one focused, read-only support diagnosis and optionally save a local report."""
     if format.lower() not in {"json", "markdown", "md"}:
         raise typer.BadParameter("Choose json or markdown.")
+    if service is not None:
+        service = service.strip() or None
     # An explicit scenario means explicit flag-driven use; only the no-argument
     # numbered picker enters interactive mode.
     interactive = scenario is None and _is_interactive()
@@ -619,12 +708,16 @@ def troubleshoot(
     ):
         if not interactive:
             raise typer.BadParameter("--service is required for this scenario.")
-        service = _prompt_unit()
-    if selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE and port is None:
+        service = _prompt_unit(selected_scenario)
+    if (
+        selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+        and port is None
+        and service is not None
+    ):
         if not interactive:
             raise typer.BadParameter("--port is required for the website scenario.")
         try:
-            port = typer.prompt("Expected local application port", type=int)
+            port = typer.prompt("Expected local application port", type=int, default=80)
         except (ValueError, TypeError) as exc:
             raise typer.BadParameter("Enter a port between 1 and 65535.") from exc
         if not 1 <= port <= 65535:
@@ -635,14 +728,16 @@ def troubleshoot(
         and interactive
         and typer.confirm("Include one related service's bounded event timeline?", default=False)
     ):
-        service = _prompt_unit("Related systemd service unit")
+        service = _prompt_unit(TroubleshootScenario.SERVICE_CRASH)
 
     if probe_http is None:
         probe_http = (
             typer.confirm(
                 "Send one HTTP HEAD request to 127.0.0.1 on the selected port?", default=False
             )
-            if interactive and selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+            if interactive
+            and selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+            and port is not None
             else False
         )
     if validate_config is None:
@@ -658,11 +753,11 @@ def troubleshoot(
         )
 
     if selected_scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
-        if service is None or port is None:
-            raise typer.BadParameter("The website scenario requires --service and --port.")
+        if port is None and service is not None:
+            raise typer.BadParameter("The website scenario requires --port.")
+        if probe_http and port is None:
+            raise typer.BadParameter("--probe-http requires --port.")
     elif selected_scenario == TroubleshootScenario.SERVICE_CRASH:
-        if service is None:
-            raise typer.BadParameter("The service-crash scenario requires --service.")
         if port is not None or probe_http:
             raise typer.BadParameter("--port and --probe-http apply only to the website scenario.")
     elif port is not None or probe_http:
@@ -673,6 +768,10 @@ def troubleshoot(
         )
     if selected_scenario == TroubleshootScenario.STORAGE and service is None and since != "2h":
         raise typer.BadParameter("--since requires --service in the storage scenario.")
+    if selected_scenario != TroubleshootScenario.STORAGE and service is None and since != "2h":
+        raise typer.BadParameter("--since requires --service for service-specific event analysis.")
+    if validate_config and service is None:
+        raise typer.BadParameter("--validate-config requires a selected service.")
 
     profile = _validate_profile(profile)
     try:

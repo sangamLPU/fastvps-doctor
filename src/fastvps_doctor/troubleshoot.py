@@ -38,6 +38,124 @@ from fastvps_doctor.runner import (
     safe_systemd_unit,
 )
 
+APPLICATION_SERVICE_GROUPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "nginx": (("nginx.service",), ("nginx",)),
+    "apache2": (("apache2.service", "httpd.service"), ("apache2ctl", "apachectl", "httpd")),
+    "mysql": (("mysql.service",), ("mysqld", "mysqld_safe")),
+    "mariadb": (("mariadb.service",), ("mariadbd", "mariadb")),
+    "postgresql": (("postgresql.service",), ("postgres",)),
+    "redis-server": (("redis-server.service", "redis.service"), ("redis-server",)),
+}
+WEB_SERVICE_NAMES = ("nginx", "apache2")
+
+
+def _inspect_application_service(
+    name: str,
+    runner: CommandRunner,
+) -> tuple[str, bool | None, bool | None, str | None]:
+    """Inspect one fixed, common application unit without reading its logs."""
+    units, executables = APPLICATION_SERVICE_GROUPS[name]
+    state = "unit_not_found"
+    found_unit: str | None = None
+    for unit in units:
+        try:
+            result = runner.systemd_unit_show(unit)
+        except OSError:
+            result = CommandResult(available=False, error="read_error")
+        state, _properties = _unit_state(result)
+        if state != "unit_not_found":
+            if state in PRESENT_STATES:
+                found_unit = unit
+            break
+
+    executable_present = any(find_executable(executable) for executable in executables)
+    if state == "unit_not_found":
+        state = "unit_not_found" if executable_present else "not_installed"
+    installed: bool | None = True if found_unit or executable_present else None
+    unit_found: bool | None = True if found_unit else None
+    if state == "not_installed":
+        installed = False
+        unit_found = False
+    elif state == "unit_not_found":
+        unit_found = False
+    elif state in UNCERTAIN_STATES:
+        if not executable_present:
+            installed = None
+        unit_found = None
+    elif state in PRESENT_STATES:
+        installed = True
+        unit_found = True
+    return state, installed, unit_found, found_unit
+
+
+def discover_relevant_services(
+    scenario: TroubleshootScenario,
+    runner: CommandRunner | None = None,
+) -> tuple[list[tuple[str, str, str]], bool]:
+    """Return fixed-name application service suggestions and discovery completeness.
+
+    SSH and Docker are deliberately excluded: they are commonly critical host
+    services and are not a sensible default suggestion for application incidents.
+    """
+    command_runner = runner or CommandRunner()
+    names = (
+        WEB_SERVICE_NAMES
+        if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+        else tuple(APPLICATION_SERVICE_GROUPS)
+    )
+    candidates: list[tuple[str, str, str]] = []
+    complete = True
+    for name in names:
+        state, _installed, unit_found, unit = _inspect_application_service(name, command_runner)
+        if unit_found is True and unit is not None:
+            candidates.append((name, unit, state))
+        if state in UNCERTAIN_STATES - {"unit_not_found"}:
+            complete = False
+            break
+    return candidates, complete
+
+
+def collect_common_web_services(runner: CommandRunner | None = None) -> DiagnosticCheck:
+    """Collect allowlisted Nginx/Apache installation and unit-state indicators."""
+    command_runner = runner or CommandRunner()
+    metrics: dict[str, str | int | float | bool | None] = {}
+    uncertain = False
+    if not sys.platform.startswith("linux"):
+        for name in WEB_SERVICE_NAMES:
+            metrics[f"{name}_installed"] = None
+            metrics[f"{name}_unit_found"] = None
+            metrics[f"{name}_state"] = "unavailable"
+        return DiagnosticCheck(
+            check_id="troubleshoot.web_services",
+            category="web",
+            status=CheckStatus.UNKNOWN,
+            summary="Common web service inventory is available only on Linux.",
+            metrics=metrics,
+        )
+
+    for index, name in enumerate(WEB_SERVICE_NAMES):
+        state, installed, unit_found, _unit = _inspect_application_service(name, command_runner)
+        metrics[f"{name}_installed"] = installed
+        metrics[f"{name}_unit_found"] = unit_found
+        metrics[f"{name}_state"] = state
+        uncertain = uncertain or state in UNCERTAIN_STATES - {"unit_not_found"}
+        if state in UNCERTAIN_STATES - {"unit_not_found"}:
+            for remaining_name in WEB_SERVICE_NAMES[index + 1 :]:
+                metrics[f"{remaining_name}_installed"] = None
+                metrics[f"{remaining_name}_unit_found"] = None
+                metrics[f"{remaining_name}_state"] = state
+            break
+    return DiagnosticCheck(
+        check_id="troubleshoot.web_services",
+        category="web",
+        status=CheckStatus.UNKNOWN if uncertain else CheckStatus.PASS,
+        summary="Read-only inventory of common Nginx and Apache executables and systemd units.",
+        metrics=metrics,
+        note=(
+            "This checks common Nginx and Apache names only. No match does not prove a website outage or rule out another web server, proxy or container."
+        ),
+    )
+
 
 def collect_selected_service(service: str, runner: CommandRunner | None = None) -> DiagnosticCheck:
     """Read properties for exactly one user-selected systemd unit."""
@@ -207,32 +325,48 @@ def build_troubleshoot_report(
         raise ValueError("The only supported profile is 'fastvps'.")
     if service:
         safe_systemd_unit(service)
-    selected_service: str | None = service
-    if scenario == TroubleshootScenario.STORAGE and service is None and since != "2h":
-        raise ValueError("--since requires a selected service in the storage scenario.")
+    selected_service = service or None
+    if selected_service is None and since != "2h":
+        raise ValueError("--since requires a selected service for service-specific event analysis.")
+    if validate_config and selected_service is None:
+        raise ValueError("--validate-config requires a selected service.")
+    if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE and probe_http and port is None:
+        raise ValueError("--probe-http requires --port.")
     if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
-        if not selected_service or port is None:
-            raise ValueError("The website scenario requires --service and --port.")
-        if not 1 <= port <= 65535:
+        if port is None and selected_service is not None:
+            raise ValueError("The website scenario requires --port.")
+        if port is not None and not 1 <= port <= 65535:
             raise ValueError("Port must be between 1 and 65535.")
-        checks = [collect_selected_service(selected_service)]
+        checks = []
+        if selected_service:
+            checks.append(collect_selected_service(selected_service))
+        else:
+            checks.append(collect_common_web_services())
         checks.extend(collect_storage())
         checks.append(collect_system()[0])
-        checks.append(collect_listeners({port}))
+        listener_ports = {port} if selected_service is not None and port is not None else {80, 443}
+        if port is not None:
+            listener_ports.add(port)
+        checks.append(collect_listeners(listener_ports))
         if probe_http:
+            if port is None:
+                raise ValueError("--probe-http requires --port.")
             checks.append(collect_loopback_http_head(port))
-        if validate_config:
+        if validate_config and selected_service:
             checks.append(collect_selected_config_validation(selected_service))
-        incident = analyze_incident(selected_service, since)
+        incident = analyze_incident(selected_service, since) if selected_service else None
     elif scenario == TroubleshootScenario.SERVICE_CRASH:
-        if not selected_service:
-            raise ValueError("The service-crash scenario requires --service.")
         if port is not None or probe_http:
             raise ValueError("--port and --probe-http apply only to the website scenario.")
-        checks = [collect_selected_service(selected_service), collect_system()[0]]
-        if validate_config:
+        checks = []
+        if selected_service:
+            checks.append(collect_selected_service(selected_service))
+        checks.append(collect_system()[0])
+        if selected_service is None:
+            checks.extend(collect_storage())
+        if validate_config and selected_service:
             checks.append(collect_selected_config_validation(selected_service))
-        incident = analyze_incident(selected_service, since)
+        incident = analyze_incident(selected_service, since) if selected_service else None
     elif scenario == TroubleshootScenario.STORAGE:
         checks = collect_storage()
         if selected_service:
@@ -263,7 +397,7 @@ def build_troubleshoot_report(
         conclusions=_conclusions(scenario, checks, incident, port),
         investigation_areas=_investigation_areas(scenario, checks),
         evidence_gaps=_evidence_gaps(scenario, checks, incident, probe_http),
-        next_actions=_next_actions(scenario),
+        next_actions=_next_actions(scenario, service_selected=selected_service is not None),
         profile=profile,
         ticket_reference=ticket_reference,
     )
@@ -400,9 +534,21 @@ def _observations(checks: list[DiagnosticCheck], port: int | None) -> list[Troub
             memory = check.metrics.get("memory_percent")
             cpu = check.metrics.get("cpu_sample_percent")
             detail = f"Current resource snapshot: memory {memory if memory is not None else 'unavailable'}%; brief CPU sample {cpu if cpu is not None else 'unavailable'}%."
-        elif check.check_id == "network.listeners" and port is not None:
-            count = check.metrics.get(f"port_{port}_listeners")
-            detail = f"Local listener inventory for selected port: {count if count is not None else 'unavailable'} listener(s)."
+        elif check.check_id == "network.listeners":
+            if any(item.check_id == "troubleshoot.web_services" for item in checks):
+                listener_ports = [80, 443] + ([port] if port not in {None, 80, 443} else [])
+                details = [
+                    f"port {checked_port} {check.metrics.get(f'port_{checked_port}_listeners') if check.metrics.get(f'port_{checked_port}_listeners') is not None else 'unavailable'}"
+                    for checked_port in listener_ports
+                ]
+                detail = "Local HTTP/HTTPS listener inventory: " + "; ".join(details) + "."
+            elif port is not None:
+                count = check.metrics.get(f"port_{port}_listeners")
+                detail = f"Local listener inventory for selected port: {count if count is not None else 'unavailable'} listener(s)."
+            else:
+                detail = "A local listener inventory was collected."
+        elif check.check_id == "troubleshoot.web_services":
+            detail = "Common web service installation and unit-state inventory was collected."
         elif check.check_id == "troubleshoot.http":
             state = check.metrics.get("http_probe_state", "unavailable")
             code = check.metrics.get("http_status_code")
@@ -453,6 +599,21 @@ def _conclusions(
     conclusions: list[TroubleshootConclusion] = []
     service_check = by_id.get("troubleshoot.service")
     service_evidence = observations.get("troubleshoot.service")
+    if service_check is None and scenario in {
+        TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        TroubleshootScenario.SERVICE_CRASH,
+    }:
+        statement = (
+            "No application service was identified, so this report cannot link a local listener to the affected application or assess that application's service health, logs or configuration. The missing name is not evidence that the application is unhealthy, and this does not confirm a website outage."
+            if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+            else "No application service was identified, so this report cannot confirm whether a particular service crashed or restarted, inspect its logs, or attribute a cause. This is insufficient evidence, not evidence that a service is unhealthy."
+        )
+        conclusions.append(
+            TroubleshootConclusion(
+                certainty=EvidenceCertainty.INSUFFICIENT,
+                statement=statement,
+            )
+        )
     if service_check and service_evidence:
         state = service_check.metrics.get("service_state")
         if state in {"active", "inactive", "failed", "masked", "unit_not_found", "not_installed"}:
@@ -485,22 +646,85 @@ def _conclusions(
                 )
             )
 
-    if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE and port is not None:
+    if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
+        web_services = by_id.get("troubleshoot.web_services")
+        web_evidence = observations.get("troubleshoot.web_services")
+        if web_services is not None and web_evidence:
+            installed = [
+                web_services.metrics.get(f"{name}_installed") for name in WEB_SERVICE_NAMES
+            ]
+            if installed == [False, False]:
+                conclusions.append(
+                    TroubleshootConclusion(
+                        certainty=EvidenceCertainty.CONFIRMED,
+                        statement=(
+                            "No common Nginx or Apache executable or service unit was detected. "
+                            "This does not confirm a website outage and does not rule out another web server, proxy or container."
+                        ),
+                        evidence_ids=[web_evidence],
+                    )
+                )
+            else:
+                for name, label in (("nginx", "Nginx"), ("apache2", "Apache")):
+                    unit_found = web_services.metrics.get(f"{name}_unit_found")
+                    state = web_services.metrics.get(f"{name}_state")
+                    installed_state = web_services.metrics.get(f"{name}_installed")
+                    if unit_found is True and isinstance(state, str):
+                        conclusions.append(
+                            TroubleshootConclusion(
+                                certainty=EvidenceCertainty.CONFIRMED,
+                                statement=f"The local inventory detected a {label} service unit reported as {state}; this does not establish application or public website health.",
+                                evidence_ids=[web_evidence],
+                            )
+                        )
+                    elif installed_state is True and state == "unit_not_found":
+                        conclusions.append(
+                            TroubleshootConclusion(
+                                certainty=EvidenceCertainty.CONFIRMED,
+                                statement=f"A {label} executable was detected, but no matching systemd service unit was found; this does not establish whether it serves the reported website.",
+                                evidence_ids=[web_evidence],
+                            )
+                        )
+                    elif installed_state is None or state in UNCERTAIN_STATES:
+                        conclusions.append(
+                            TroubleshootConclusion(
+                                certainty=EvidenceCertainty.INSUFFICIENT,
+                                statement=f"The local inventory could not determine whether {label} is installed or managed by systemd.",
+                                evidence_ids=[web_evidence],
+                            )
+                        )
+                if not any(item.evidence_ids == [web_evidence] for item in conclusions):
+                    conclusions.append(
+                        TroubleshootConclusion(
+                            certainty=EvidenceCertainty.INSUFFICIENT,
+                            statement="The common web service inventory was incomplete, so it cannot establish whether Nginx or Apache is installed or managed by systemd.",
+                            evidence_ids=[web_evidence],
+                        )
+                    )
+
         listener_check = by_id.get("network.listeners")
         listener_evidence = observations.get("network.listeners")
-        count = listener_check.metrics.get(f"port_{port}_listeners") if listener_check else None
-        if listener_evidence and isinstance(count, int):
-            conclusions.append(
-                TroubleshootConclusion(
-                    certainty=EvidenceCertainty.CONFIRMED,
-                    statement=(
-                        f"The local listener inventory reported no listener on port {port} at snapshot time."
-                        if count == 0
-                        else f"The local listener inventory reported {count} listener(s) on port {port}; this does not prove the application route or public reachability works."
-                    ),
-                    evidence_ids=[listener_evidence],
-                )
-            )
+        if web_services is not None:
+            ports = [80, 443]
+            if port is not None and port not in ports:
+                ports.append(port)
+        else:
+            ports = [port] if port is not None else [80, 443]
+        if listener_check is not None and listener_evidence:
+            for checked_port in ports:
+                count = listener_check.metrics.get(f"port_{checked_port}_listeners")
+                if isinstance(count, int):
+                    conclusions.append(
+                        TroubleshootConclusion(
+                            certainty=EvidenceCertainty.CONFIRMED,
+                            statement=(
+                                f"The local listener inventory reported no listener on port {checked_port} at snapshot time. This does not confirm a website outage."
+                                if count == 0
+                                else f"The local listener inventory reported {count} listener(s) on port {checked_port}; this does not prove the application route or public reachability works."
+                            ),
+                            evidence_ids=[listener_evidence],
+                        )
+                    )
         http_check = by_id.get("troubleshoot.http")
         http_evidence = observations.get("troubleshoot.http")
         if http_check and http_evidence:
@@ -674,6 +898,13 @@ def _evidence_gaps(
         )
     if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE and not probe_http:
         gaps.append("The optional loopback HTTP HEAD probe was not requested.")
+    if scenario in {
+        TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        TroubleshootScenario.SERVICE_CRASH,
+    } and "troubleshoot.service" not in {check.check_id for check in checks}:
+        gaps.append(
+            "No systemd unit was selected. Service state, restart counters, service-specific logs and configuration were not checked, so service health and service-specific cause cannot be determined."
+        )
     if scenario == TroubleshootScenario.STORAGE:
         gaps.append(
             "Storage counters do not identify which application files are large or prove why a write failed."
@@ -685,7 +916,7 @@ def _evidence_gaps(
     return gaps
 
 
-def _next_actions(scenario: TroubleshootScenario) -> list[str]:
+def _next_actions(scenario: TroubleshootScenario, *, service_selected: bool = True) -> list[str]:
     actions = {
         TroubleshootScenario.WEBSITE_UNAVAILABLE: [
             "Confirm the expected service name, local listening port and application route with the site administrator.",
@@ -702,7 +933,16 @@ def _next_actions(scenario: TroubleshootScenario) -> list[str]:
             "Review this sanitized report before attaching it to a support request.",
         ],
     }
-    return actions[scenario]
+    result = list(actions[scenario])
+    if not service_selected and scenario in {
+        TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        TroubleshootScenario.SERVICE_CRASH,
+    }:
+        result.insert(
+            0,
+            "If service-specific diagnosis is needed, identify the affected systemd unit with the application administrator and rerun this check; do not guess a unit name.",
+        )
+    return result
 
 
 def _markdown_text(value: str) -> str:

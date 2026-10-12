@@ -26,10 +26,15 @@ Diagnostic commands are read-only. `report --output` creates a new local report 
 | `fastvps-doctor web --port PORT` | Also inspect one explicitly named local application port. |
 | `fastvps-doctor explain` | Explain rule evidence and limitations. |
 | `fastvps-doctor incident --service UNIT --since 2h` | Classify timestamped journal metadata for one unit in a 1-minute to 24-hour window; raw logs are discarded. |
-| `fastvps-doctor troubleshoot` | In an interactive terminal, show a numbered picker for the three focused scenarios. |
-| `fastvps-doctor troubleshoot --scenario website-unavailable --service UNIT --port PORT` | Inspect one systemd unit, one local listener port, bounded service/kernel events, root storage and a current resource snapshot. |
+| `fastvps-doctor troubleshoot` | In an interactive terminal, show a numbered picker and offer detected relevant application services, manual entry, or “I'm not sure.” |
+| Interactive service prompt: option `1` | Choose from detected application services only; SSH and Docker are not generic suggestions. |
+| Interactive service prompt: option `2` | Enter one application service name; identifiers are validated before use. |
+| Interactive service prompt: option `3` or Enter | Continue without a service name; service-specific health, logs, restart history and configuration remain unknown. |
+| `fastvps-doctor troubleshoot --scenario website-unavailable --service UNIT --port PORT` | Inspect one explicitly selected systemd unit, one local listener port, bounded service/kernel events, root storage and a current resource snapshot. |
+| Interactive website diagnosis when the service is unknown | Check local listeners on ports 80 and 443, Nginx/Apache installation and unit-state indicators, storage and current resources. No match does not confirm a website outage. |
 | `fastvps-doctor troubleshoot --scenario website-unavailable --service UNIT --port PORT --probe-http` | Opt in to one HTTP `HEAD /` request to `127.0.0.1`; no body is read and public reachability is not tested. |
-| `fastvps-doctor troubleshoot --scenario service-crash --service UNIT --since 2h` | Inspect one unit, bounded timestamped service/kernel journal evidence and a current resource snapshot. |
+| `fastvps-doctor troubleshoot --scenario service-crash --service UNIT --since 2h` | Inspect one explicitly selected unit, bounded timestamped service/kernel journal evidence and a current resource snapshot. |
+| Interactive service-crash with no unit | Collect general resource and storage snapshots only; no per-service logs or restart conclusions are available. |
 | `fastvps-doctor troubleshoot --scenario storage` | Inspect root and bounded local mount space, inode and read-only counters. |
 | `fastvps-doctor troubleshoot --scenario storage --service UNIT --since 2h` | Also inspect one explicitly selected service and its bounded journal window. |
 | `fastvps-doctor troubleshoot ... --validate-config` | Opt in to a supported Nginx/Apache/SSH syntax validator for the selected service; raw validator output is discarded. |
