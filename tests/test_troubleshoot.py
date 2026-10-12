@@ -781,7 +781,8 @@ def test_noninteractive_service_specific_scenario_still_requires_service(monkeyp
     )
 
     assert result.exit_code != 0
-    assert "--service is required" in result.output
+    plain_output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.output)
+    assert "--service is required for this scenario." in plain_output
 
 
 def test_noninteractive_website_accepts_explicit_service_and_port(monkeypatch) -> None:
