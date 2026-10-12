@@ -395,9 +395,15 @@ def build_troubleshoot_report(
         observations=_observations(checks, port),
         timeline=_timeline(incident),
         conclusions=_conclusions(scenario, checks, incident, port),
-        investigation_areas=_investigation_areas(scenario, checks),
+        investigation_areas=_investigation_areas(scenario, checks, incident),
         evidence_gaps=_evidence_gaps(scenario, checks, incident, probe_http),
-        next_actions=_next_actions(scenario, service_selected=selected_service is not None),
+        next_actions=_next_actions(
+            scenario,
+            service_selected=selected_service is not None,
+            checks=checks,
+            analysis=incident,
+            port=port,
+        ),
         profile=profile,
         ticket_reference=ticket_reference,
     )
@@ -407,51 +413,131 @@ def build_troubleshoot_report(
 def render_troubleshoot_markdown(report: TroubleshootReport) -> str:
     """Render the same sanitized model used by the JSON report."""
     lines = [
-        "# FastVPS Doctor focused support handoff",
+        "# FastVPS Doctor incident handoff",
         "",
-        "> Independent and unofficial. This report is a diagnostic aid, not a root-cause finding or provider decision.",
+        "> Independent and unofficial. Diagnostic evidence is not a root-cause or provider-responsibility decision.",
         "> Review and redact this report before sharing it.",
         "",
-        "## Report header",
+        "## 1. Incident summary",
         "",
-        f"- Version: {report.version}",
-        f"- Report schema: {report.schema_version}",
-        f"- Scenario: {report.scenario.value}",
+        f"- Incident type: {_scenario_label(report.scenario)}",
+        f"- Customer-reported symptom: {_markdown_text(report.reported_problem or 'Not provided.')}",
+        f"- Affected service: {_markdown_text(report.service_label or 'Not identified.')}",
         f"- Snapshot time (UTC): {report.timestamp_utc.isoformat()}",
-        f"- Environment: {_markdown_text(report.distribution)}; kernel {report.kernel_release or 'not available'}",
-        f"- Service label: {_markdown_text(report.service_label or 'not provided')}",
-        f"- Selected local port: {report.selected_port if report.selected_port is not None else 'not applicable'}",
-        f"- Profile: {report.profile or 'standard'}",
+        f"- Environment: {_markdown_text(report.distribution)}; kernel {_markdown_text(report.kernel_release or 'not available')}",
+        f"- Overall assessment: **{_overall_assessment(report)}**",
     ]
+    if report.scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
+        lines.append(
+            f"- Expected local port: {report.selected_port if report.selected_port is not None else 'not selected'}"
+        )
     if report.ticket_reference:
         lines.append(f"- Ticket reference: `{report.ticket_reference}`")
-    if report.reported_problem:
-        lines += ["", "## Reported symptom", "", _markdown_text(report.reported_problem)]
 
-    lines += ["", "## Checks actually run", ""]
+    lines += ["", "## 2. Most important observations", ""]
+    summary_observations = _summary_observations(report)
+    if summary_observations:
+        for item in summary_observations[:3]:
+            lines.append(
+                f"- **{item.evidence_id} — {_observation_title(item.check_id)}:** "
+                f"{_markdown_text(item.summary)} "
+                f"Why it matters: {_markdown_text(_observation_relevance(report, item))} "
+                f"*(`{item.source}`; `{item.check_id or 'not available'}`)*"
+            )
+        displayed_count = min(len(summary_observations), 3)
+        additional_count = len(report.observations) - displayed_count
+        if additional_count > 0:
+            lines.append(
+                f"{additional_count} additional observation(s) are listed in the technical appendix."
+            )
+    else:
+        lines.append("No observations were collected.")
+
+    lines += ["", "## 3. Likely investigation areas", ""]
+    observation_ids = {item.evidence_id for item in report.observations}
+    for certainty, heading in (
+        (EvidenceCertainty.CONFIRMED, "Confirmed observations"),
+        (EvidenceCertainty.PLAUSIBLE, "Plausible explanations"),
+        (EvidenceCertainty.INSUFFICIENT, "Unknown or unverified"),
+    ):
+        items = [
+            item
+            for item in report.conclusions
+            if item.certainty == certainty
+            and not (
+                certainty == EvidenceCertainty.CONFIRMED
+                and item.evidence_ids
+                and set(item.evidence_ids) <= observation_ids
+            )
+        ]
+        lines += [f"### {heading}", ""]
+        if items:
+            lines.extend(_render_conclusion(item) for item in items[:3])
+            if len(items) > 3:
+                lines.append(f"{len(items) - 3} more item(s) appear in the technical appendix.")
+        elif certainty == EvidenceCertainty.CONFIRMED:
+            lines.append("No additional confirmed finding beyond the recorded observations.")
+        elif certainty == EvidenceCertainty.PLAUSIBLE:
+            lines.append("No evidence-supported causal explanation was identified.")
+        else:
+            lines.append("See the evidence gaps below.")
+        lines.append("")
+
+    lines += ["## 4. Recommended next steps", ""]
+    lines.extend(
+        f"{index}. {_markdown_text(value)}"
+        for index, value in enumerate(report.next_actions[:3], start=1)
+    )
+    if not report.next_actions:
+        lines.append("No next steps were generated from the available evidence.")
+
+    lines += ["", "## 5. Evidence gaps", ""]
+    if report.evidence_gaps:
+        lines.extend(f"- {_markdown_text(value)}" for value in report.evidence_gaps[:4])
+        if len(report.evidence_gaps) > 4:
+            lines.append(
+                f"{len(report.evidence_gaps) - 4} additional limitation(s) are listed in the technical appendix."
+            )
+    else:
+        lines.append("No specific evidence gaps were recorded; review the check details below.")
+
+    lines += ["", "## 6. Technical appendix", "", "### Report metadata", ""]
+    lines += [
+        f"- Product version: {report.version}",
+        f"- Report schema: {report.schema_version}",
+        f"- Scenario key: `{report.scenario.value}`",
+        f"- Profile: {report.profile or 'standard'}",
+        f"- Loopback HTTP probe requested: {str(report.loopback_http_probe_requested).lower()}",
+    ]
+    lines += ["", "### Complete observation register", ""]
+    if report.observations:
+        for item in report.observations:
+            lines.append(
+                f"- **{item.evidence_id}** (`{item.check_id or 'unknown check'}`, {item.status.value if item.status else 'status unavailable'}): {_markdown_text(item.summary)}"
+            )
+    else:
+        lines.append("No observations were collected.")
+
+    lines += ["", "### Checks and structured metrics", ""]
     if report.checks:
         for check in report.checks:
-            lines.append(f"### `{check.check_id}` — {check.status.value.upper()}")
+            lines.append(f"#### `{check.check_id}` — {check.status.value.upper()}")
             lines += ["", _markdown_text(check.summary)]
             if check.metrics:
                 lines.append("")
-                for key, value in sorted(check.metrics.items()):
-                    lines.append(f"- `{key}`: `{value if value is not None else 'unavailable'}`")
+                lines.extend(
+                    f"- `{key}`: `{value if value is not None else 'unavailable'}`"
+                    for key, value in sorted(check.metrics.items())
+                )
             if check.note:
                 lines += ["", f"Note: {_markdown_text(check.note)}"]
+            if check.status == CheckStatus.SKIPPED:
+                lines.append("Collection state: explicitly skipped.")
             lines.append("")
     else:
         lines.append("No diagnostic checks were available.")
 
-    lines += ["## Confirmed observations", ""]
-    lines.extend(
-        f"- **{item.evidence_id}** ({item.source}): {_markdown_text(item.summary)}"
-        for item in report.observations
-    )
-    if not report.observations:
-        lines.append("- No observations were collected.")
-
-    lines += ["", "## Timestamped event timeline", ""]
+    lines += ["### Timestamped event timeline", ""]
     if report.timeline:
         lines.extend(
             f"- **{item.event_id}** {item.timestamp_utc.isoformat()} — {item.classification.value}: {_markdown_text(item.summary)}"
@@ -459,43 +545,229 @@ def render_troubleshoot_markdown(report: TroubleshootReport) -> str:
         )
     else:
         lines.append(
-            "No qualifying timestamped events were available. This does not prove no event occurred."
+            "No qualifying timestamped events were included. This does not prove that no event occurred."
         )
 
-    lines += ["", "## Evidence-based explanations", ""]
+    lines += ["", "### Complete conclusion register", ""]
     if report.conclusions:
-        lines.extend(
-            f"- **{item.certainty.value.title()}** ({', '.join(item.evidence_ids) or 'no supporting observation'}): {_markdown_text(item.statement)}"
-            for item in report.conclusions
-        )
+        lines.extend(_render_conclusion(item) for item in report.conclusions)
     else:
-        lines.append("- Insufficient evidence to describe a scenario-specific explanation.")
-
-    for heading, values in (
-        ("Areas for further investigation", report.investigation_areas),
-        ("Evidence gaps and limits", report.evidence_gaps),
-        ("Suggested next actions", report.next_actions),
-    ):
-        lines += ["", f"## {heading}", ""]
-        lines.extend(f"- {_markdown_text(value)}" for value in values) if values else lines.append(
-            "- None recorded."
-        )
+        lines.append("No conclusions were generated.")
+    lines += ["", "### All recorded limitations", ""]
+    if report.evidence_gaps:
+        lines.extend(f"- {_markdown_text(value)}" for value in report.evidence_gaps)
+    else:
+        lines.append("No specific evidence gaps were recorded.")
+    if report.investigation_areas:
+        lines += ["", "### Investigation areas (not diagnoses)", ""]
+        lines.extend(f"- {_markdown_text(value)}" for value in report.investigation_areas)
+    if report.next_actions:
+        lines += ["", "### Complete recommended-action list", ""]
+        lines.extend(f"- {_markdown_text(value)}" for value in report.next_actions)
 
     lines += [
         "",
-        "## Privacy and limitations",
+        "### Privacy and interpretation",
         "",
-        "The export contains allowlisted summaries only; raw logs, command output, host identity, addresses, paths, usernames, credentials and application response bodies are excluded. A loopback response does not establish public reachability. Correlation and current snapshots do not prove causation. Missing or restricted logs are incomplete evidence.",
+        "Exports use allowlisted, sanitized summaries and structured metrics; raw command output, journal lines, configuration contents, local paths, credentials and application response bodies are not exported. Sanitization is pattern-based and is not a universal secret scanner. Review the full report before sharing. A successful collection check does not establish application health; a loopback result does not establish public reachability; event timing does not prove causation.",
         "",
     ]
     if report.profile == "fastvps":
         lines += [
-            "## FastVPS support context",
+            "### FastVPS support context",
             "",
             "This is an independent, unofficial tool and does not connect to FastVPS systems. Support scope depends on the customer's ordered plan. Review the report before contacting [official FastVPS support](https://fastvps.gr/en/faq/).",
             "",
         ]
     return "\n".join(lines)
+
+
+def _scenario_label(scenario: TroubleshootScenario) -> str:
+    return {
+        TroubleshootScenario.WEBSITE_UNAVAILABLE: "Website or application unavailable",
+        TroubleshootScenario.SERVICE_CRASH: "Service crash or restart",
+        TroubleshootScenario.STORAGE: "Storage or write problem",
+    }[scenario]
+
+
+def _overall_assessment(report: TroubleshootReport) -> str:
+    checks = {check.check_id: check for check in report.checks}
+    service_state = checks.get("troubleshoot.service")
+    service_state_value = (
+        service_state.metrics.get("service_state") if service_state is not None else None
+    )
+    http_check = checks.get("troubleshoot.http")
+    http_code = http_check.metrics.get("http_status_code") if http_check is not None else None
+    root_check = checks.get("storage.root")
+    root_readonly = root_check.metrics.get("readonly") if root_check is not None else None
+    expected_listener_absent = (
+        report.scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+        and service_state is not None
+        and report.selected_port is not None
+        and checks.get("network.listeners") is not None
+        and checks["network.listeners"].metrics.get(f"port_{report.selected_port}_listeners") == 0
+    )
+    failure_event = any(
+        event.classification.value == "service_failure" for event in report.timeline
+    )
+    if (
+        service_state_value == "failed"
+        or failure_event
+        or (isinstance(http_code, int) and 500 <= http_code <= 599)
+    ):
+        return "Evidence of a specific failure"
+
+    if (
+        any(item.certainty == EvidenceCertainty.PLAUSIBLE for item in report.conclusions)
+        or any(check.status in {CheckStatus.WARNING, CheckStatus.FAIL} for check in report.checks)
+        or root_readonly is True
+        or expected_listener_absent
+    ):
+        return "Possible issue requiring investigation"
+
+    if (
+        any(item.certainty == EvidenceCertainty.INSUFFICIENT for item in report.conclusions)
+        or any(
+            check.status in {CheckStatus.UNKNOWN, CheckStatus.SKIPPED} for check in report.checks
+        )
+        or (
+            report.scenario == TroubleshootScenario.SERVICE_CRASH
+            and not any(
+                event.classification.value == "service_failure" for event in report.timeline
+            )
+            and service_state_value != "failed"
+        )
+        or (report.scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE and http_check is None)
+    ):
+        return "Inconclusive / insufficient evidence"
+
+    return "No relevant problem detected in available checks"
+
+
+def _prioritized_observations(
+    report: TroubleshootReport,
+) -> list[TroubleshootObservation]:
+    order = {
+        TroubleshootScenario.WEBSITE_UNAVAILABLE: (
+            "troubleshoot.service",
+            "troubleshoot.http",
+            "network.listeners",
+            "troubleshoot.web_services",
+            "storage.root",
+            "storage.mounts",
+            "system.resources",
+        ),
+        TroubleshootScenario.SERVICE_CRASH: (
+            "troubleshoot.service",
+            "system.resources",
+            "storage.root",
+            "storage.mounts",
+        ),
+        TroubleshootScenario.STORAGE: (
+            "storage.root",
+            "storage.mounts",
+            "troubleshoot.service",
+            "system.resources",
+        ),
+    }[report.scenario]
+    priorities = {check_id: index for index, check_id in enumerate(order)}
+    return sorted(
+        report.observations,
+        key=lambda item: (priorities.get(item.check_id or "", len(priorities)), item.evidence_id),
+    )
+
+
+def _summary_observations(report: TroubleshootReport) -> list[TroubleshootObservation]:
+    """Keep redundant connection-failure and no-listener facts together in the appendix only."""
+    observations = _prioritized_observations(report)
+    if report.scenario != TroubleshootScenario.WEBSITE_UNAVAILABLE or report.selected_port is None:
+        return observations
+    checks = {check.check_id: check for check in report.checks}
+    http_check = checks.get("troubleshoot.http")
+    listener_check = checks.get("network.listeners")
+    if (
+        http_check is not None
+        and http_check.metrics.get("http_probe_state") == "connection_error"
+        and listener_check is not None
+        and listener_check.metrics.get(f"port_{report.selected_port}_listeners") == 0
+    ):
+        primary_checks = {
+            "troubleshoot.service",
+            "network.listeners",
+            "troubleshoot.web_services",
+        }
+        return [item for item in observations if item.check_id in primary_checks]
+    return observations
+
+
+def _observation_title(check_id: str | None) -> str:
+    return {
+        "troubleshoot.service": "Selected service state",
+        "troubleshoot.http": "Local HTTP probe",
+        "network.listeners": "Local listening ports",
+        "troubleshoot.web_services": "Common web-server inventory",
+        "storage.root": "Root filesystem capacity",
+        "storage.mounts": "Additional filesystem inventory",
+        "system.resources": "Current resource snapshot",
+    }.get(check_id or "", "Diagnostic observation")
+
+
+def _observation_relevance(report: TroubleshootReport, observation: TroubleshootObservation) -> str:
+    check = next((item for item in report.checks if item.check_id == observation.check_id), None)
+    metrics = check.metrics if check is not None else {}
+    check_id = observation.check_id
+    if check_id == "troubleshoot.service":
+        state = metrics.get("service_state")
+        if state == "failed":
+            return "Confirms the selected unit failed; it does not identify why."
+        if state == "active":
+            return "Current state only; historical health and app routes remain unverified."
+        if state in {"permission_restricted", "unavailable"}:
+            return "Access limits leave service state and history unknown."
+        return "One unit snapshot cannot establish root cause."
+    if check_id == "troubleshoot.http":
+        state = metrics.get("http_probe_state")
+        if state == "response_5xx":
+            return "The local handler returned an error; public reachability was not tested."
+        if state == "connection_error":
+            return "No local response on this port; the responsible component remains unknown."
+        if isinstance(state, str) and state.startswith("response_"):
+            return "One local HEAD response does not verify the app route or public access."
+        return "The probe was incomplete; app and public health remain unknown."
+    if check_id == "network.listeners":
+        expected_ports = (
+            [report.selected_port]
+            if report.selected_port is not None
+            else [80, 443]
+            if report.scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE
+            else []
+        )
+        counts = [metrics.get(f"port_{port}_listeners") for port in expected_ports]
+        if counts and all(count == 0 for count in counts):
+            return "No listener on checked port(s); another port, proxy or container may differ."
+        if any(isinstance(count, int) and count > 0 for count in counts):
+            return "A listener is present; app route and public access remain unverified."
+        return "Local snapshot only; remote access was not tested."
+    if check_id == "troubleshoot.web_services":
+        if metrics.get("nginx_installed") is False and metrics.get("apache2_installed") is False:
+            return "Only common Nginx and Apache names were checked; another server may be used."
+        return "This inventory covers common Nginx and Apache names only."
+    if check_id == "storage.root":
+        if metrics.get("readonly") is True:
+            return "Can block writes, but the app may use another filesystem."
+        return "Point-in-time capacity does not establish the app's write path or cause."
+    if check_id == "storage.mounts":
+        return "Bounded counters only; mount paths and files were not inspected."
+    if check_id == "system.resources":
+        return "Brief snapshot; does not show earlier pressure or cause."
+    if observation.status in {CheckStatus.UNKNOWN, CheckStatus.SKIPPED}:
+        return "Incomplete evidence cannot establish service health."
+    return "Bounded context; does not independently establish root cause."
+
+
+def _render_conclusion(item: TroubleshootConclusion) -> str:
+    evidence = ", ".join(item.evidence_ids) or "no direct evidence reference"
+    return f"- **{item.certainty.value.title()}** ({evidence}): {_markdown_text(item.statement)}"
 
 
 def _nonnegative_int(value: str | None) -> int | None:
@@ -548,13 +820,31 @@ def _observations(checks: list[DiagnosticCheck], port: int | None) -> list[Troub
             else:
                 detail = "A local listener inventory was collected."
         elif check.check_id == "troubleshoot.web_services":
-            detail = "Common web service installation and unit-state inventory was collected."
+            inventory = []
+            for name in WEB_SERVICE_NAMES:
+                installed = check.metrics.get(f"{name}_installed")
+                state = check.metrics.get(f"{name}_state")
+                install_label = (
+                    "detected"
+                    if installed is True
+                    else "not detected"
+                    if installed is False
+                    else "undetermined"
+                )
+                state_label = state if isinstance(state, str) else "undetermined"
+                inventory.append(f"{name}: {install_label}; unit state {state_label}")
+            detail = "Common web-service inventory: " + "; ".join(inventory) + "."
         elif check.check_id == "troubleshoot.http":
             state = check.metrics.get("http_probe_state", "unavailable")
             code = check.metrics.get("http_status_code")
             detail = f"Loopback HTTP HEAD result: {state}; status code {code if code is not None else 'not available'}."
         elif check.check_id == "storage.mounts":
-            detail = check.summary
+            count = check.metrics.get("mount_count")
+            inspected = check.metrics.get("inspected_mount_count")
+            detail = (
+                f"Additional local filesystems: inspected {inspected if inspected is not None else 'unavailable'}"
+                f" of {count if count is not None else 'unavailable'} inventoried; paths are withheld."
+            )
         source = (
             "loopback"
             if check.check_id == "troubleshoot.http"
@@ -861,25 +1151,92 @@ def _conclusions(
 
 
 def _investigation_areas(
-    scenario: TroubleshootScenario, checks: list[DiagnosticCheck]
+    scenario: TroubleshootScenario,
+    checks: list[DiagnosticCheck],
+    analysis: IncidentAnalysis | None,
 ) -> list[str]:
-    areas = {
-        TroubleshootScenario.WEBSITE_UNAVAILABLE: [
-            "Compare the selected port and service state with the application's intended bind address and deployment configuration.",
-            "If local checks respond, have an administrator separately review DNS, proxy routing and external network reachability.",
-        ],
-        TroubleshootScenario.SERVICE_CRASH: [
-            "Review the full local journal and unit configuration around the reported incident time with an administrator.",
-            "Check application dependencies and exit details; do not infer cause from the current resource snapshot.",
-        ],
-        TroubleshootScenario.STORAGE: [
-            "Compare the bounded filesystem and inode counters with the exact filesystem used by the failing application.",
-            "Review storage-related application or service errors separately; no customer files were searched.",
-        ],
-    }[scenario]
+    by_id = {check.check_id: check for check in checks}
+    areas: list[str] = []
+    service = by_id.get("troubleshoot.service")
+    service_state = service.metrics.get("service_state") if service else None
+    listener = by_id.get("network.listeners")
+
+    if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
+        if service is None:
+            areas.append(
+                "Identify the affected application, deployment method and expected local port before drawing service-specific conclusions."
+            )
+        elif service_state == "failed":
+            areas.append(
+                "The selected unit is currently failed; inspect its local startup journal and application exit details to determine why."
+            )
+        if listener is not None and any(
+            value == 0
+            for key, value in listener.metrics.items()
+            if key.startswith("port_") and key.endswith("_listeners")
+        ):
+            areas.append(
+                "Compare the application's intended bind address and port with the local listener inventory."
+            )
+        elif service is not None:
+            areas.append(
+                "Compare the selected unit's intended bind address and port with the observed listener state."
+            )
+        inventory = by_id.get("troubleshoot.web_services")
+        if (
+            inventory is not None
+            and inventory.metrics.get("nginx_installed") is False
+            and inventory.metrics.get("apache2_installed") is False
+        ):
+            areas.append(
+                "The common Nginx and Apache names were not detected; confirm whether the application uses another proxy, web server or container."
+            )
+        http = by_id.get("troubleshoot.http")
+        if http is not None and http.metrics.get("http_probe_state") == "response_5xx":
+            areas.append(
+                "A local HTTP server returned a 5xx response; inspect the relevant application route or upstream separately."
+            )
+    elif scenario == TroubleshootScenario.SERVICE_CRASH:
+        if service is None:
+            areas.append(
+                "Identify the affected systemd unit or deployment manager; no service-specific history was collected."
+            )
+        elif analysis is not None and analysis.events:
+            areas.append(
+                "Compare the classified service events with the full local journal and application logs around those timestamps."
+            )
+        elif service_state == "failed":
+            areas.append(
+                "The selected unit is failed, but no qualifying event was captured; inspect its exit details and local startup journal."
+            )
+        else:
+            areas.append(
+                "Compare the report window with the application's own logs and deployment history; current service state alone cannot explain a past crash."
+            )
+        if analysis and any(event.classification.value == "oom_kill" for event in analysis.events):
+            areas.append(
+                "Review nearby kernel memory events and service records independently; timestamp proximity does not establish causation."
+            )
+    else:
+        root = by_id.get("storage.root")
+        readonly = root.metrics.get("readonly") if root else None
+        if readonly is True:
+            areas.append(
+                "The root filesystem is reported read-only; confirm whether the affected application's write path is on that filesystem."
+            )
+        else:
+            areas.append(
+                "Identify the exact filesystem and path used by the failing application, then compare it with the bounded capacity counters."
+            )
+        areas.append(
+            "Correlate the application error time with its own logs and any service evidence; this tool did not inspect customer files."
+        )
+
     if any(check.status in {CheckStatus.UNKNOWN, CheckStatus.SKIPPED} for check in checks):
-        areas.append("Resolve the unavailable or incomplete checks before drawing a conclusion.")
-    return areas
+        areas.append(
+            "Resolve the specifically listed incomplete checks if they are needed for this incident."
+        )
+    return list(dict.fromkeys(areas))[:4]
 
 
 def _evidence_gaps(
@@ -888,61 +1245,159 @@ def _evidence_gaps(
     analysis: IncidentAnalysis | None,
     probe_http: bool,
 ) -> list[str]:
-    gaps = [
-        "This report is a point-in-time, read-only snapshot and does not establish root cause.",
-        "Public internet reachability, DNS delegation and provider network paths were not tested.",
-    ]
-    if analysis is not None and not analysis.complete:
+    gaps: list[str] = []
+    check_ids = {check.check_id for check in checks}
+    if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
+        if "troubleshoot.service" not in check_ids:
+            gaps.append(
+                "No systemd unit was selected: service state, restart counters, service logs and configuration were not checked; this is not evidence of a service failure."
+            )
+        if not probe_http:
+            gaps.append(
+                "The loopback HTTP probe was skipped by design because it is opt-in; no HTTP response was observed."
+            )
         gaps.append(
-            "One or more bounded journal sources were unavailable or incomplete; missing events are not proof that no event occurred."
+            "No external DNS, TLS, public reachability or provider network-path checks were performed."
         )
-    if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE and not probe_http:
-        gaps.append("The optional loopback HTTP HEAD probe was not requested.")
-    if scenario in {
-        TroubleshootScenario.WEBSITE_UNAVAILABLE,
-        TroubleshootScenario.SERVICE_CRASH,
-    } and "troubleshoot.service" not in {check.check_id for check in checks}:
+        if "network.listeners" in check_ids and "troubleshoot.service" not in check_ids:
+            gaps.append(
+                "No application-specific port was selected; only the limited common HTTP/HTTPS listener ports were checked."
+            )
+    if scenario == TroubleshootScenario.SERVICE_CRASH and "troubleshoot.service" not in check_ids:
         gaps.append(
-            "No systemd unit was selected. Service state, restart counters, service-specific logs and configuration were not checked, so service health and service-specific cause cannot be determined."
+            "No systemd unit was selected. Service-specific health and cause therefore remain unknown."
         )
     if scenario == TroubleshootScenario.STORAGE:
         gaps.append(
-            "Storage counters do not identify which application files are large or prove why a write failed."
+            "The application write path, per-user quota and file ownership were not checked; no customer files were searched."
         )
-    if any(check.status in {CheckStatus.UNKNOWN, CheckStatus.SKIPPED} for check in checks):
-        gaps.append(
-            "At least one check was skipped or incomplete, possibly due to permissions, platform or missing tools."
-        )
+    if analysis is not None:
+        if not analysis.complete:
+            if analysis.unavailable_sources:
+                sources = ", ".join(
+                    source.replace("_", " ") for source in analysis.unavailable_sources
+                )
+                gaps.append(
+                    f"The bounded {sources} query was unavailable or incomplete; its precise access or tool failure reason was not retained in the export."
+                )
+            else:
+                gaps.append(
+                    "The bounded journal output was malformed or exceeded its record limit; event history may be incomplete."
+                )
+        elif not analysis.events:
+            gaps.append(
+                "No qualifying timestamped event matched the bounded journal window; unclassified or unretained events may still exist."
+            )
+        elif not any(event.classification.value == "service_failure" for event in analysis.events):
+            gaps.append(
+                "The timeline contains classified events but no confirmed service-failure transition; event timing alone cannot establish root cause."
+            )
+    for check in checks:
+        if check.status == CheckStatus.SKIPPED:
+            gaps.append(
+                f"{check.check_id} was skipped: {check.summary}"
+                + (f" {check.note}" if check.note else "")
+            )
+        elif check.status == CheckStatus.UNKNOWN:
+            states = {
+                str(value)
+                for key, value in check.metrics.items()
+                if key.endswith("_state") and isinstance(value, str)
+            }
+            if "permission_restricted" in states:
+                reason = "Permission was denied or restricted."
+            elif "timeout" in states:
+                reason = "The check timed out."
+            elif "unavailable" in states:
+                reason = "A required local tool or service manager was unavailable."
+            elif states & {"unsupported_filesystem", "remote_skipped"}:
+                reason = (
+                    "Unsupported or remote filesystem entries were intentionally not inspected."
+                )
+            elif "partial" in states:
+                reason = (
+                    "One or more counters or entries were unavailable, so this result is partial."
+                )
+            else:
+                reason = "The check returned incomplete or unknown evidence."
+            gaps.append(f"{check.check_id}: {reason} {check.summary}")
     return gaps
 
 
-def _next_actions(scenario: TroubleshootScenario, *, service_selected: bool = True) -> list[str]:
-    actions = {
-        TroubleshootScenario.WEBSITE_UNAVAILABLE: [
-            "Confirm the expected service name, local listening port and application route with the site administrator.",
-            "Review this sanitized report before attaching it to a support request.",
-        ],
-        TroubleshootScenario.SERVICE_CRASH: [
-            "Have an administrator inspect full service and kernel logs around the event timestamps.",
-            "Review the service's exit result and dependencies before considering any restart or configuration change.",
-            "Review this sanitized report before attaching it to a support request.",
-        ],
-        TroubleshootScenario.STORAGE: [
-            "Compare space and inode usage with read-only system tools and identify the application's actual filesystem.",
-            "Ask an administrator to review relevant storage and application errors; do not delete files based only on this report.",
-            "Review this sanitized report before attaching it to a support request.",
-        ],
-    }
-    result = list(actions[scenario])
-    if not service_selected and scenario in {
-        TroubleshootScenario.WEBSITE_UNAVAILABLE,
-        TroubleshootScenario.SERVICE_CRASH,
-    }:
-        result.insert(
-            0,
-            "If service-specific diagnosis is needed, identify the affected systemd unit with the application administrator and rerun this check; do not guess a unit name.",
-        )
-    return result
+def _next_actions(
+    scenario: TroubleshootScenario,
+    *,
+    service_selected: bool,
+    checks: list[DiagnosticCheck],
+    analysis: IncidentAnalysis | None,
+    port: int | None,
+) -> list[str]:
+    by_id = {check.check_id: check for check in checks}
+    service = by_id.get("troubleshoot.service")
+    service_state = service.metrics.get("service_state") if service else None
+    actions: list[str]
+    if scenario == TroubleshootScenario.WEBSITE_UNAVAILABLE:
+        if not service_selected:
+            actions = [
+                "Identify the affected application, its deployment method and expected local port with the site administrator; do not guess a unit name.",
+                "After confirming those details, rerun the check with the exact service unit and port so its state and listener can be compared.",
+                "Have an administrator review DNS, TLS, proxy routing and public reachability separately; those paths were not tested here.",
+            ]
+        else:
+            actions = []
+            if service_state == "failed":
+                actions.append(
+                    "Review the selected unit's local journal and exit details around the failure time; the export omits raw log messages."
+                )
+            if port is not None:
+                actions.append(
+                    f"Compare the application's intended bind address and port {port} with the observed local listener state."
+                )
+            if not actions:
+                actions.append(
+                    "Compare the selected unit and local HTTP response with the application's intended route and upstream."
+                )
+            actions.append(
+                "Have an administrator assess public DNS, TLS and proxy reachability separately; this report only covers selected local checks."
+            )
+    elif scenario == TroubleshootScenario.SERVICE_CRASH:
+        if not service_selected:
+            actions = [
+                "Identify the affected application and its systemd unit or other deployment manager with the administrator; do not substitute an unrelated service.",
+                "Rerun the bounded service timeline using the confirmed unit and incident time window.",
+            ]
+        else:
+            failure_event = (
+                next(
+                    (
+                        event
+                        for event in analysis.events
+                        if event.classification.value == "service_failure"
+                    ),
+                    None,
+                )
+                if analysis is not None
+                else None
+            )
+            review_window = (
+                f" around {failure_event.timestamp_utc.isoformat()}"
+                if failure_event is not None
+                else " around the reported incident time"
+            )
+            actions = [
+                "Have an administrator compare the unit's exit details with its full local journal and application logs"
+                + review_window
+                + ".",
+                "Compare deployment and dependency changes from the same interval; event correlation alone does not prove cause.",
+            ]
+    else:
+        actions = [
+            "Identify the exact filesystem and path used by the failing application, then compare its space and inode counters with read-only tools.",
+            "Have an administrator correlate the application error with quota, mount and service evidence before considering changes.",
+            "Do not delete files or change mount settings based only on this snapshot.",
+        ]
+    actions.append("Review the sanitized report before attaching it to a support request.")
+    return list(dict.fromkeys(actions))[:4]
 
 
 def _markdown_text(value: str) -> str:

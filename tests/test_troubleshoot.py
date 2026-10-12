@@ -16,6 +16,7 @@ from fastvps_doctor.models import (
     IncidentAnalysis,
     IncidentEvent,
     IncidentEventType,
+    TroubleshootReport,
     TroubleshootScenario,
 )
 from fastvps_doctor.privacy import sanitize_checks
@@ -883,6 +884,11 @@ def test_website_unknown_service_collects_only_general_read_only_evidence(
     assert any("No common Nginx or Apache" in item.statement for item in report.conclusions)
     assert all(item.certainty.value != "plausible" for item in report.conclusions)
     assert any("No systemd unit was selected" in gap for gap in report.evidence_gaps)
+    markdown = render_troubleshoot_markdown(report)
+    assert "Overall assessment: **Inconclusive / insufficient evidence**" in markdown
+    assert "No systemd unit was selected" in markdown
+    assert "Identify the affected application" in markdown
+    assert "Evidence of a specific failure" not in markdown
 
 
 def test_service_crash_unknown_service_collects_general_evidence_only(
@@ -940,6 +946,99 @@ def test_json_and_markdown_reports_are_built_from_same_sanitized_scenario_model(
     assert from_json.scenario == TroubleshootScenario.STORAGE
     assert "98.1%" in markdown
     assert "do not prove the cause" in markdown
+    assert from_json.schema_version == "1.0"
+    assert "## 6. Technical appendix" in markdown
+    assert "OBS-001" in markdown
+
+
+@pytest.mark.parametrize(
+    ("listener_count", "expected"),
+    [
+        (0, "Possible issue requiring investigation"),
+        (1, "Inconclusive / insufficient evidence"),
+    ],
+)
+def test_website_assessment_does_not_equate_listener_inventory_with_app_health(
+    listener_count: int,
+    expected: str,
+) -> None:
+    report = TroubleshootReport(
+        version="0.3.0",
+        scenario=TroubleshootScenario.WEBSITE_UNAVAILABLE,
+        selected_port=8080,
+        checks=[
+            DiagnosticCheck(
+                check_id="troubleshoot.service",
+                category="services",
+                status=CheckStatus.PASS,
+                summary="Selected service is active.",
+                metrics={"service_state": "active"},
+            ),
+            DiagnosticCheck(
+                check_id="network.listeners",
+                category="network",
+                status=CheckStatus.PASS,
+                summary="Listener inventory completed.",
+                metrics={"port_8080_listeners": listener_count},
+            ),
+        ],
+    )
+
+    assert troubleshoot_module._overall_assessment(report) == expected
+
+
+def test_report_gaps_distinguish_permission_restriction_from_unknown_journal_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = DiagnosticCheck(
+        check_id="troubleshoot.service",
+        category="services",
+        status=CheckStatus.UNKNOWN,
+        summary="The selected systemd unit state could not be read.",
+        metrics={"service_state": "permission_restricted"},
+    )
+    resources = _check("system.resources", {"memory_percent": 22.0})
+    analysis = IncidentAnalysis(
+        service="app-worker",
+        window_seconds=3600,
+        complete=False,
+        unavailable_sources=["service_journal", "kernel_journal"],
+    )
+    monkeypatch.setattr(troubleshoot_module, "collect_selected_service", lambda _unit: service)
+    monkeypatch.setattr(troubleshoot_module, "collect_system", lambda: [resources])
+    monkeypatch.setattr(troubleshoot_module, "analyze_incident", lambda *_args: analysis)
+
+    report = build_troubleshoot_report(
+        TroubleshootScenario.SERVICE_CRASH,
+        service="app-worker",
+    )
+    markdown = render_troubleshoot_markdown(report)
+    gaps = "\n".join(report.evidence_gaps)
+
+    assert "Permission was denied or restricted" in gaps
+    assert "service journal, kernel journal" in gaps
+    assert "precise access or tool failure reason was not retained" in gaps
+    assert "possibly due to permissions, platform or missing tools" not in gaps
+    assert "Inconclusive / insufficient evidence" in markdown
+
+
+def test_report_gap_explains_partial_filesystem_metrics() -> None:
+    partial_mounts = DiagnosticCheck(
+        check_id="storage.mounts",
+        category="storage",
+        status=CheckStatus.UNKNOWN,
+        summary="Some bounded filesystem counters could not be read.",
+        metrics={"mount_0_state": "partial"},
+    )
+
+    gaps = troubleshoot_module._evidence_gaps(
+        TroubleshootScenario.STORAGE,
+        [partial_mounts],
+        None,
+        False,
+    )
+
+    assert any("counters or entries were unavailable" in gap for gap in gaps)
 
 
 def test_service_crash_repeated_events_and_nearby_oom_are_cautious(monkeypatch) -> None:
@@ -1015,6 +1114,16 @@ def test_service_crash_repeated_events_and_nearby_oom_are_cautious(monkeypatch) 
     assert oom.certainty.value == "plausible"
     assert len(oom.evidence_ids) == 2
     assert "does not prove causation" in oom.statement
+    failure_time = next(
+        event.timestamp_utc
+        for event in events
+        if event.classification == IncidentEventType.SERVICE_FAILURE
+    )
+    assert report.next_actions[0].startswith(
+        "Have an administrator compare the unit's exit details"
+    )
+    assert report.next_actions[0].endswith(f"around {failure_time.isoformat()}.")
+    assert all("restart the service" not in item.lower() for item in report.next_actions)
     assert "api-worker" not in report_json
     assert "memory 25.0%" in report.observations[1].summary
 
